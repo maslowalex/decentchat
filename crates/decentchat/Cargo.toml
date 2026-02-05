@@ -3,6 +3,12 @@ name = "decentchat"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "decentchat"
