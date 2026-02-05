@@ -1,5 +1,52 @@
 //! Protocol layer for decentchat.
 //!
 //! Handles networking, wire format, and synchronization using iroh.
+//!
+//! # Overview
+//!
+//! This crate provides the transport layer for decentchat, enabling peer-to-peer
+//! communication using iroh's QUIC-based networking and iroh-gossip for message
+//! dissemination.
+//!
+//! # Key Components
+//!
+//! - [`Identity`] - Cryptographic identity management (key generation, persistence)
+//! - [`Node`] - High-level node lifecycle management
+//! - [`Transport`] - Trait abstracting the networking layer
+//! - [`QuicTransport`] - QUIC-based implementation using iroh-gossip
+//!
+//! # Example
+//!
+//! ```ignore
+//! use decentchat_protocol::{Identity, Node, QuicTransport, QuicTransportConfig};
+//! use decentchat_core::GroupId;
+//!
+//! // Create an identity (generate new or load from file).
+//! let identity = Identity::generate();
+//!
+//! // Create the transport.
+//! let config = QuicTransportConfig::default();
+//! let transport = QuicTransport::new(&identity, config).await?;
+//!
+//! // Create the node.
+//! let node = Node::new(identity, transport);
+//!
+//! // Join a group.
+//! let group = GroupId::new("my-chat");
+//! let subscription = node.subscribe(&group, vec![]).await?;
+//!
+//! // Use subscription.sender to broadcast and subscription.receiver to receive.
+//! ```
 
-// Stub for Phase 1. Full implementation in Phase 2-3.
+pub mod error;
+pub mod identity;
+pub mod node;
+pub mod transport;
+
+pub use error::{ProtocolError, Result};
+pub use identity::Identity;
+pub use node::Node;
+pub use transport::{
+    QuicTransport, QuicTransportConfig, TopicReceiver, TopicSender, TopicSubscription, Transport,
+    TransportEvent,
+};

@@ -26,6 +26,7 @@ async-trait = "0.1"
 
 # Networking
 iroh = "0.95"
+iroh-gossip = "0.95"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -48,6 +49,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utilities
 bytes = "1"
+futures-lite = "2"
 rand = "0.9"
 dirs = "6"
 hex = "0.4"
@@ -56,3 +58,4 @@ blake3 = "1"
 # Testing
 proptest = "1"
 tokio-test = "0.4"
+tempfile = "3"
