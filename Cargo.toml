@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/decentchat",
+    "crates/decentchat-core",
+    "crates/decentchat-protocol",
+    "crates/decentchat-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/youruser/decentchat"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Internal crates
+decentchat-core = { path = "crates/decentchat-core" }
+decentchat-protocol = { path = "crates/decentchat-protocol" }
+decentchat-tui = { path = "crates/decentchat-tui" }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Networking
+iroh = "0.95"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+bytes = "1"
+rand = "0.9"
+dirs = "6"
+hex = "0.4"
+blake3 = "1"
+
+# Testing
+proptest = "1"
+tokio-test = "0.4"

@@ -1,0 +1,13 @@
+[package]
+name = "decentchat-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+decentchat-core.workspace = true
+decentchat-protocol.workspace = true
+
+tokio = { workspace = true, features = ["sync", "macros"] }
+ratatui.workspace = true
+crossterm.workspace = true

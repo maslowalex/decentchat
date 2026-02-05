@@ -1,0 +1,15 @@
+[package]
+name = "decentchat-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+hex.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
