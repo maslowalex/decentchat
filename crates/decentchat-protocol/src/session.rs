@@ -59,6 +59,9 @@ impl SessionEventReceiver {
     }
 }
 
+/// Presence heartbeat interval in seconds.
+const PRESENCE_INTERVAL_SECS: u64 = 30;
+
 /// A session managing a single group's state and communication.
 pub struct GroupSession {
     state: GroupState,
@@ -67,6 +70,8 @@ pub struct GroupSession {
     local_node: NodeId,
     config: SessionConfig,
     event_sender: mpsc::Sender<ChatEvent>,
+    connected_peer_count: usize,
+    last_presence_broadcast: Option<std::time::Instant>,
 }
 
 impl GroupSession {
@@ -88,6 +93,8 @@ impl GroupSession {
             local_node,
             config,
             event_sender,
+            connected_peer_count: 0,
+            last_presence_broadcast: None,
         };
 
         let receiver = SessionEventReceiver {
@@ -120,6 +127,11 @@ impl GroupSession {
     /// Get access to the group state.
     pub fn state(&self) -> &GroupState {
         &self.state
+    }
+
+    /// Get the number of connected peers.
+    pub fn peer_count(&self) -> usize {
+        self.connected_peer_count
     }
 
     /// Mark sync as complete (for first peer or testing).
@@ -172,11 +184,36 @@ impl GroupSession {
     /// Returns Some(()) if an event was processed, None if the transport closed.
     pub async fn process_event(&mut self) -> Option<()> {
         self.check_sync_timeout().await;
+        self.maybe_broadcast_presence().await;
 
         let event = self.subscription.receiver.recv().await?;
         self.handle_transport_event(event).await;
 
         Some(())
+    }
+
+    /// Broadcast a presence heartbeat if enough time has passed.
+    async fn maybe_broadcast_presence(&mut self) {
+        let now = std::time::Instant::now();
+        let should_broadcast = match self.last_presence_broadcast {
+            None => self.sync_state.is_active(),
+            Some(last) => {
+                self.sync_state.is_active()
+                    && now.duration_since(last).as_secs() >= PRESENCE_INTERVAL_SECS
+            }
+        };
+
+        if should_broadcast {
+            self.last_presence_broadcast = Some(now);
+            let timestamp = self.state.clock.tick();
+            let wire = WireMessage::Presence {
+                node: self.local_node,
+                timestamp,
+            };
+            if let Err(e) = self.broadcast_wire_message(&wire).await {
+                warn!("failed to broadcast presence: {}", e);
+            }
+        }
     }
 
     /// Request sync from existing peers.
@@ -263,7 +300,7 @@ impl GroupSession {
                     .await;
             }
             WireMessage::Presence { node, timestamp } => {
-                self.handle_presence(node, timestamp);
+                self.handle_presence(node, timestamp).await;
             }
             WireMessage::Leave { node } => {
                 self.handle_leave(node).await;
@@ -353,9 +390,16 @@ impl GroupSession {
         }
     }
 
-    fn handle_presence(&mut self, node: NodeId, timestamp: decentchat_core::HLC) {
+    async fn handle_presence(&mut self, node: NodeId, timestamp: decentchat_core::HLC) {
         self.state.clock.receive(&timestamp);
+        self.state.users.update_last_seen(node, timestamp.wall_time);
         debug!("received presence from {}", node);
+
+        self.emit_event(ChatEvent::PresenceUpdated {
+            group: self.state.id.clone(),
+            node,
+        })
+        .await;
     }
 
     async fn handle_leave(&mut self, node: NodeId) {
@@ -369,11 +413,22 @@ impl GroupSession {
     async fn handle_peer_joined(&mut self, peer: NodeId) {
         debug!("peer joined: {}", peer);
 
+        let was_disconnected = self.connected_peer_count == 0;
+        self.connected_peer_count += 1;
+
         if self.sync_state.is_joining()
             && self.config.request_sync_on_join
             && let Err(e) = self.request_sync().await
         {
             warn!("failed to request sync: {}", e);
+        }
+
+        // If we were disconnected and now have a peer, request re-sync.
+        if was_disconnected && self.sync_state.is_active() {
+            debug!("reconnected, requesting re-sync");
+            if let Err(e) = self.request_sync().await {
+                warn!("failed to request re-sync: {}", e);
+            }
         }
 
         self.emit_event(ChatEvent::UserJoined {
@@ -382,14 +437,28 @@ impl GroupSession {
             username: None,
         })
         .await;
+
+        self.emit_event(ChatEvent::ConnectionChanged {
+            connected: true,
+            peer_count: self.connected_peer_count,
+        })
+        .await;
     }
 
     async fn handle_peer_left(&mut self, peer: NodeId) {
         debug!("peer left: {}", peer);
 
+        self.connected_peer_count = self.connected_peer_count.saturating_sub(1);
+
         self.emit_event(ChatEvent::UserLeft {
             group: self.state.id.clone(),
             node: peer,
+        })
+        .await;
+
+        self.emit_event(ChatEvent::ConnectionChanged {
+            connected: self.connected_peer_count > 0,
+            peer_count: self.connected_peer_count,
         })
         .await;
     }

@@ -216,9 +216,17 @@ async fn run_relay_loop(
                     ChatEvent::SyncCompleted { message_count, .. } => {
                         println!("[{}] Sync completed: {} messages", group_name, message_count);
                     }
-                    ChatEvent::ConnectionChanged { connected } => {
-                        let status = if *connected { "up" } else { "down" };
+                    ChatEvent::ConnectionChanged { connected, peer_count } => {
+                        let status = if *connected {
+                            format!("up ({} peers)", peer_count)
+                        } else {
+                            "down".to_string()
+                        };
                         println!("[{}] Connection: {}", group_name, status);
+                    }
+                    ChatEvent::PresenceUpdated { node, .. } => {
+                        let id = hex::encode(&node.as_bytes()[..4]);
+                        println!("[{}] Presence: {}", group_name, id);
                     }
                 }
             }

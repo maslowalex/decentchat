@@ -9,11 +9,15 @@ use decentchat_core::ChatEvent;
 use decentchat_protocol::{GroupSession, SessionEventReceiver};
 use tokio::sync::mpsc;
 
-use crate::app::{App, AppConfig, ConnectionStatus, DisplayMessage};
+use crate::app::{App, AppConfig, ConnectionStatus, DisplayMessage, MemberInfo, PresenceStatus};
+use crate::commands::{self, Command, ParseResult, HELP_TEXT};
 use crate::error::Result;
 use crate::input::{Action, map_key_event};
 use crate::render::render;
 use crate::terminal::{Tui, init, restore};
+
+/// Timeout in milliseconds for presence (considered away after this).
+const PRESENCE_TIMEOUT_MS: u64 = 90_000;
 
 /// Poll interval for terminal events.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -134,7 +138,7 @@ async fn handle_terminal_event(
             Action::CursorRight => app.cursor_right(),
             Action::ScrollUp(n) => app.scroll_up(n),
             Action::ScrollDown(n) => app.scroll_down(n),
-            Action::Submit => submit_message(app, session).await?,
+            Action::Submit => submit_message(app, session).await,
             Action::None => {}
         }
     }
@@ -142,24 +146,54 @@ async fn handle_terminal_event(
     Ok(())
 }
 
-/// Submit the current input as a chat message.
-async fn submit_message(app: &mut App, session: &mut GroupSession) -> Result<()> {
+/// Submit the current input as a chat message or command.
+async fn submit_message(app: &mut App, session: &mut GroupSession) {
     let input = app.take_input();
-    if input.is_empty() {
-        return Ok(());
-    }
 
-    // Check for /nick command.
-    if let Some(new_name) = input.strip_prefix("/nick ") {
-        let new_name = new_name.trim().to_string();
-        if !new_name.is_empty() {
-            session.set_username(new_name).await?;
+    match commands::parse(&input) {
+        ParseResult::Empty => {}
+
+        ParseResult::Message(content) => {
+            if let Err(e) = session.send_message(content).await {
+                app.add_message(DisplayMessage::system(format!("Error: {}", e)));
+            }
         }
-        return Ok(());
-    }
 
-    session.send_message(input).await?;
-    Ok(())
+        ParseResult::Command(cmd) => {
+            handle_command(app, session, cmd).await;
+        }
+
+        ParseResult::UnknownCommand(msg) => {
+            app.add_message(DisplayMessage::system(msg));
+        }
+    }
+}
+
+/// Handle a parsed slash command.
+async fn handle_command(app: &mut App, session: &mut GroupSession, cmd: Command) {
+    match cmd {
+        Command::Nick(new_name) => {
+            if let Err(e) = session.set_username(new_name).await {
+                app.add_message(DisplayMessage::system(format!("Error: {}", e)));
+            }
+        }
+
+        Command::Quit => {
+            app.quit();
+        }
+
+        Command::Help => {
+            app.add_message(DisplayMessage::system(HELP_TEXT.to_string()));
+        }
+
+        Command::Members => {
+            app.toggle_sidebar();
+        }
+
+        Command::Clear => {
+            app.clear_messages();
+        }
+    }
 }
 
 /// Handle a chat event from the protocol layer.
@@ -174,11 +208,13 @@ fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) {
         ChatEvent::UserJoined { node, username, .. } => {
             let name = username.unwrap_or_else(|| node.to_string());
             app.add_message(DisplayMessage::system(format!("{} joined", name)));
+            update_members(app, session);
         }
 
         ChatEvent::UserLeft { node, .. } => {
             let name = session.state().display_name(&node);
             app.add_message(DisplayMessage::system(format!("{} left", name)));
+            update_members(app, session);
         }
 
         ChatEvent::UsernameChanged { node, username, .. } => {
@@ -188,23 +224,95 @@ fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) {
             } else {
                 app.add_message(DisplayMessage::system(format!("User is now known as {}", username)));
             }
+            update_members(app, session);
         }
 
         ChatEvent::SyncCompleted { message_count, .. } => {
-            app.set_status(ConnectionStatus::Connected);
+            let peer_count = session.peer_count();
+            app.set_status(ConnectionStatus::Connected { peer_count });
             app.add_message(DisplayMessage::system(format!(
                 "Synced {} message{}",
                 message_count,
                 if message_count == 1 { "" } else { "s" }
             )));
+            update_members(app, session);
         }
 
-        ChatEvent::ConnectionChanged { connected } => {
+        ChatEvent::ConnectionChanged { connected, peer_count } => {
             if connected {
-                app.set_status(ConnectionStatus::Connected);
+                app.set_status(ConnectionStatus::Connected { peer_count });
             } else {
                 app.set_status(ConnectionStatus::Disconnected);
             }
         }
+
+        ChatEvent::PresenceUpdated { .. } => {
+            update_members(app, session);
+        }
     }
+}
+
+/// Update the members list from session state.
+fn update_members(app: &mut App, session: &GroupSession) {
+    let state = session.state();
+    let local_node = app.local_node();
+    let now_ms = current_time_millis();
+
+    let mut members: Vec<MemberInfo> = state
+        .users
+        .nodes()
+        .map(|node| {
+            let display_name = state.display_name(node);
+            let is_local = *node == local_node;
+            let presence_status = compute_presence_status(&state.users, node, now_ms);
+
+            MemberInfo {
+                node_id: *node,
+                display_name,
+                is_local,
+                presence_status,
+            }
+        })
+        .collect();
+
+    // Sort: local user first, then by display name.
+    members.sort_by(|a, b| {
+        if a.is_local && !b.is_local {
+            std::cmp::Ordering::Less
+        } else if !a.is_local && b.is_local {
+            std::cmp::Ordering::Greater
+        } else {
+            a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase())
+        }
+    });
+
+    app.update_members(members);
+}
+
+/// Compute presence status based on last_seen timestamp.
+fn compute_presence_status(
+    users: &decentchat_core::UserRegistry,
+    node: &decentchat_core::NodeId,
+    now_ms: u64,
+) -> PresenceStatus {
+    match users.last_seen(node) {
+        Some(last_seen) => {
+            let elapsed = now_ms.saturating_sub(last_seen);
+            if elapsed < PRESENCE_TIMEOUT_MS {
+                PresenceStatus::Online
+            } else {
+                PresenceStatus::Away
+            }
+        }
+        None => PresenceStatus::Unknown,
+    }
+}
+
+/// Get current time in milliseconds since UNIX epoch.
+fn current_time_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_millis() as u64
 }

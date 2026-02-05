@@ -9,6 +9,9 @@ use crate::types::NodeId;
 pub struct UserEntry {
     pub username: String,
     pub updated_at: HLC,
+    /// Wall time (millis) of last presence heartbeat.
+    #[serde(default)]
+    pub last_seen: Option<u64>,
 }
 
 /// LWW-Map: NodeId -> Username.
@@ -33,15 +36,29 @@ impl UserRegistry {
                 // Existing entry is newer or equal, ignore.
             }
             _ => {
+                let last_seen = self.entries.get(&node).and_then(|e| e.last_seen);
                 self.entries.insert(
                     node,
                     UserEntry {
                         username,
                         updated_at: timestamp,
+                        last_seen,
                     },
                 );
             }
         }
+    }
+
+    /// Update the last_seen timestamp for a node.
+    pub fn update_last_seen(&mut self, node: NodeId, wall_time_millis: u64) {
+        if let Some(entry) = self.entries.get_mut(&node) {
+            entry.last_seen = Some(wall_time_millis);
+        }
+    }
+
+    /// Get the last_seen timestamp for a node.
+    pub fn last_seen(&self, node: &NodeId) -> Option<u64> {
+        self.entries.get(node).and_then(|e| e.last_seen)
     }
 
     /// Get username for a node.

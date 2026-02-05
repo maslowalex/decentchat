@@ -202,6 +202,7 @@ mod tests {
         let user_entry = UserEntry {
             username: "bob".to_string(),
             updated_at: make_hlc(node2),
+            last_seen: None,
         };
 
         let wire = WireMessage::SyncResponse {

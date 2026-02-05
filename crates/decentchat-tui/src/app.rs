@@ -10,6 +10,9 @@ const MAX_MESSAGES: usize = 1000;
 /// Maximum length of input text.
 const MAX_INPUT_LENGTH: usize = 500;
 
+/// Width of the members sidebar in characters.
+pub const SIDEBAR_WIDTH: u16 = 20;
+
 /// A message prepared for display in the UI.
 #[derive(Clone, Debug)]
 pub struct DisplayMessage {
@@ -21,6 +24,31 @@ pub struct DisplayMessage {
     pub is_local: bool,
     /// Formatted timestamp for display (e.g., "[HH:MM]").
     pub timestamp_display: String,
+}
+
+/// Presence status for a member.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PresenceStatus {
+    /// Member is actively online (heartbeat received recently).
+    #[default]
+    Online,
+    /// Member has not sent a heartbeat recently.
+    Away,
+    /// Presence status is unknown (no heartbeat data).
+    Unknown,
+}
+
+/// Information about a group member for display.
+#[derive(Clone, Debug)]
+pub struct MemberInfo {
+    /// Node ID of the member.
+    pub node_id: NodeId,
+    /// Display name (username or truncated node ID).
+    pub display_name: String,
+    /// Whether this is the local user.
+    pub is_local: bool,
+    /// Presence status.
+    pub presence_status: PresenceStatus,
 }
 
 impl DisplayMessage {
@@ -59,20 +87,38 @@ pub enum ConnectionStatus {
     /// Synchronizing history with peers.
     Syncing,
     /// Fully connected and synced.
-    Connected,
+    Connected { peer_count: usize },
+    /// Attempting to reconnect after disconnection.
+    Reconnecting { attempt: u32 },
     /// Disconnected from peers.
     Disconnected,
 }
 
 impl ConnectionStatus {
     /// Get a short status string for display.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> String {
         match self {
-            ConnectionStatus::Connecting => "Connecting...",
-            ConnectionStatus::Syncing => "Syncing...",
-            ConnectionStatus::Connected => "Connected",
-            ConnectionStatus::Disconnected => "Disconnected",
+            ConnectionStatus::Connecting => "Connecting...".to_string(),
+            ConnectionStatus::Syncing => "Syncing...".to_string(),
+            ConnectionStatus::Connected { peer_count } => {
+                if *peer_count == 0 {
+                    "Connected (no peers)".to_string()
+                } else if *peer_count == 1 {
+                    "Connected (1 peer)".to_string()
+                } else {
+                    format!("Connected ({} peers)", peer_count)
+                }
+            }
+            ConnectionStatus::Reconnecting { attempt } => {
+                format!("Reconnecting (attempt {})", attempt)
+            }
+            ConnectionStatus::Disconnected => "Disconnected".to_string(),
         }
+    }
+
+    /// Check if currently connected.
+    pub fn is_connected(&self) -> bool {
+        matches!(self, ConnectionStatus::Connected { .. })
     }
 }
 
@@ -95,6 +141,8 @@ pub struct App {
     config: AppConfig,
     local_node: NodeId,
     should_quit: bool,
+    members: Vec<MemberInfo>,
+    sidebar_visible: bool,
 }
 
 impl App {
@@ -109,6 +157,8 @@ impl App {
             config,
             local_node,
             should_quit: false,
+            members: Vec::new(),
+            sidebar_visible: false,
         }
     }
 
@@ -230,6 +280,39 @@ impl App {
     /// Get the total message count.
     pub fn message_count(&self) -> usize {
         self.messages.len()
+    }
+
+    /// Get the members list.
+    pub fn members(&self) -> &[MemberInfo] {
+        &self.members
+    }
+
+    /// Check if the sidebar is visible.
+    pub fn sidebar_visible(&self) -> bool {
+        self.sidebar_visible
+    }
+
+    /// Toggle the members sidebar visibility.
+    pub fn toggle_sidebar(&mut self) {
+        self.sidebar_visible = !self.sidebar_visible;
+    }
+
+    /// Update the members list.
+    pub fn update_members(&mut self, members: Vec<MemberInfo>) {
+        self.members = members;
+    }
+
+    /// Clear all messages.
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+        self.scroll_offset = 0;
+    }
+
+    /// Update peer count in connection status.
+    pub fn update_peer_count(&mut self, peer_count: usize) {
+        if let ConnectionStatus::Connected { .. } = self.status {
+            self.status = ConnectionStatus::Connected { peer_count };
+        }
     }
 }
 

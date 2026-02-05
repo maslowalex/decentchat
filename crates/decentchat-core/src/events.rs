@@ -27,5 +27,8 @@ pub enum ChatEvent {
     SyncCompleted { group: GroupId, message_count: usize },
 
     /// Connection status changed.
-    ConnectionChanged { connected: bool },
+    ConnectionChanged { connected: bool, peer_count: usize },
+
+    /// Presence updated for a node.
+    PresenceUpdated { group: GroupId, node: NodeId },
 }
