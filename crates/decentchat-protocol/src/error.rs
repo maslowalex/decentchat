@@ -32,6 +32,10 @@ pub enum ProtocolError {
     /// Sync protocol error.
     #[error("sync error: {0}")]
     SyncError(String),
+
+    /// Connection ticket parsing or encoding error.
+    #[error("ticket error: {0}")]
+    TicketError(String),
 }
 
 /// Convenience Result type for protocol operations.

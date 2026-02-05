@@ -44,6 +44,7 @@ pub mod messages;
 pub mod node;
 pub mod session;
 pub mod sync;
+pub mod ticket;
 pub mod transport;
 
 pub use error::{ProtocolError, Result};
@@ -52,6 +53,7 @@ pub use messages::WireMessage;
 pub use node::Node;
 pub use session::{GroupSession, SessionConfig, SessionEventReceiver};
 pub use sync::SyncState;
+pub use ticket::ConnectionTicket;
 pub use transport::{
     BootstrapPeer, QuicTransport, QuicTransportConfig, TopicReceiver, TopicSender,
     TopicSubscription, Transport, TransportEvent,

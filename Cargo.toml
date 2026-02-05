@@ -51,6 +51,9 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Encoding
+data-encoding = "2.9"
+
 # Utilities
 bytes = "1"
 futures-lite = "2"

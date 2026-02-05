@@ -41,13 +41,17 @@ pub enum Command {
 /// Arguments for the join command.
 #[derive(clap::Args)]
 pub struct JoinArgs {
-    /// Group name to join.
+    /// Group name (optional if ticket contains group).
     #[arg(short, long)]
-    pub group: String,
+    pub group: Option<String>,
 
     /// Your display name.
     #[arg(short, long)]
     pub name: String,
+
+    /// Connection ticket from relay.
+    #[arg(short, long)]
+    pub ticket: Option<String>,
 
     /// Known peer (node_id or node_id@host:port).
     #[arg(short, long)]

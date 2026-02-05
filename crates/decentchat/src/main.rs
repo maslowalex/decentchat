@@ -11,8 +11,8 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use decentchat_core::{ChatEvent, GroupId};
 use decentchat_protocol::{
-    BootstrapPeer, GroupSession, Identity, QuicTransport, QuicTransportConfig, SessionConfig,
-    Transport,
+    BootstrapPeer, ConnectionTicket, GroupSession, Identity, QuicTransport, QuicTransportConfig,
+    SessionConfig, Transport,
 };
 use decentchat_tui::AppConfig;
 use tracing::info;
@@ -62,7 +62,34 @@ fn setup_logging(verbose: bool, tui_mode: bool) {
 
 /// Join a group and launch the TUI.
 async fn cmd_join(config_dir: PathBuf, args: JoinArgs) -> Result<()> {
-    validate_join_args(&args)?;
+    // Parse ticket if provided.
+    let (ticket_bootstrap, ticket_group) = if let Some(ref t) = args.ticket {
+        let ticket: ConnectionTicket = t
+            .parse()
+            .context("failed to parse connection ticket")?;
+        let peer = if ticket.addrs().is_empty() {
+            BootstrapPeer::new(ticket.node_id())
+        } else {
+            BootstrapPeer::with_addr(ticket.node_id(), ticket.addrs()[0])
+        };
+        (Some(peer), ticket.group().map(String::from))
+    } else {
+        (None, None)
+    };
+
+    // Combine bootstrap peers from --ticket and --peer.
+    let mut bootstrap = parse_bootstrap_peers(&args.peer)?;
+    if let Some(peer) = ticket_bootstrap {
+        bootstrap.push(peer);
+    }
+
+    // Use group from --group or ticket.
+    let group_name = args
+        .group
+        .or(ticket_group)
+        .ok_or_else(|| anyhow::anyhow!("group required: use --group or provide a ticket"))?;
+
+    validate_join_args(&args.name, &group_name)?;
 
     let identity = load_identity(&config_dir)?;
     let config = QuicTransportConfig {
@@ -70,8 +97,7 @@ async fn cmd_join(config_dir: PathBuf, args: JoinArgs) -> Result<()> {
         ..Default::default()
     };
     let transport = create_transport(&identity, config).await?;
-    let bootstrap = parse_bootstrap_peers(&args.peer)?;
-    let group_id = GroupId::new(&args.group);
+    let group_id = GroupId::new(&group_name);
 
     let subscription = transport
         .subscribe(&group_id, bootstrap)
@@ -86,7 +112,7 @@ async fn cmd_join(config_dir: PathBuf, args: JoinArgs) -> Result<()> {
     );
 
     let tui_config = AppConfig {
-        group_name: args.group,
+        group_name,
         username: args.name,
     };
 
@@ -99,11 +125,11 @@ async fn cmd_join(config_dir: PathBuf, args: JoinArgs) -> Result<()> {
 }
 
 /// Validate join command arguments.
-fn validate_join_args(args: &JoinArgs) -> Result<()> {
-    if args.group.is_empty() {
+fn validate_join_args(username: &str, group_name: &str) -> Result<()> {
+    if group_name.is_empty() {
         bail!("group name must not be empty");
     }
-    if args.name.is_empty() {
+    if username.is_empty() {
         bail!("username must not be empty");
     }
     Ok(())
@@ -130,18 +156,32 @@ async fn cmd_relay(config_dir: PathBuf, args: RelayArgs) -> Result<()> {
 
     // Print actual listen addresses discovered by iroh.
     let endpoint_addr = transport.endpoint().addr();
-    let ip_addrs: Vec<_> = endpoint_addr.ip_addrs().collect();
+    let ip_addrs: Vec<std::net::SocketAddr> = endpoint_addr.ip_addrs().copied().collect();
+
+    // Display connection tickets for each group.
+    for group_name in &args.groups {
+        let ticket = if ip_addrs.is_empty() {
+            ConnectionTicket::new(identity.node_id())
+        } else {
+            ConnectionTicket::with_addrs(identity.node_id(), ip_addrs.clone())
+        }
+        .with_group(group_name);
+
+        println!("\nShare this ticket to join '{}':", group_name);
+        println!("  {}", ticket);
+    }
+
+    // Also print traditional format for backward compatibility.
+    println!("\nOr use traditional format:");
     if ip_addrs.is_empty() {
-        println!("Warning: No IP addresses discovered. Try specifying --bind-addr.");
-        println!("Connect with: --peer {}@<your-ip>:{}", node_id_hex, args.port);
+        println!("  --peer {}@<your-ip>:{}", node_id_hex, args.port);
     } else {
-        println!("Connect with any of:");
-        for addr in ip_addrs {
+        for addr in &ip_addrs {
             println!("  --peer {}@{}", node_id_hex, addr);
         }
     }
 
-    println!("Hosting groups: {}", args.groups.join(", "));
+    println!("\nHosting groups: {}", args.groups.join(", "));
 
     run_relay_loop(&transport, &identity, &args.groups).await?;
 
