@@ -1,0 +1,24 @@
+[Unit]
+Description=DecentChat Relay Node
+Documentation=https://github.com/user/decentchat
+After=network.target
+
+[Service]
+Type=simple
+User=%USER%
+EnvironmentFile=/etc/decentchat/relay.env
+Environment=DECENTCHAT_CONFIG=/var/lib/decentchat
+ExecStart=/usr/local/bin/decentchat relay --groups ${RELAY_GROUPS} --port ${RELAY_PORT}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/decentchat
+
+[Install]
+WantedBy=multi-user.target
