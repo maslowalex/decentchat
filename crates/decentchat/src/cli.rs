@@ -83,6 +83,10 @@ pub struct RelayArgs {
     /// Disable relay servers (for local/LAN testing).
     #[arg(long)]
     pub local: bool,
+
+    /// External IP to advertise (for NAT/VPS deployments).
+    #[arg(long, env = "RELAY_EXTERNAL_IP")]
+    pub external_ip: Option<std::net::IpAddr>,
 }
 
 /// Arguments for the identity command.

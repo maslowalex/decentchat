@@ -160,9 +160,13 @@ async fn cmd_relay(config_dir: PathBuf, args: RelayArgs) -> Result<()> {
     println!("Relay node started");
     println!("Node ID: {}", node_id_hex);
 
-    // Print actual listen addresses discovered by iroh.
+    // Use external IP if provided, otherwise use iroh-discovered addresses.
     let endpoint_addr = transport.endpoint().addr();
-    let ip_addrs: Vec<std::net::SocketAddr> = endpoint_addr.ip_addrs().copied().collect();
+    let ip_addrs: Vec<std::net::SocketAddr> = if let Some(ext_ip) = args.external_ip {
+        vec![std::net::SocketAddr::new(ext_ip, args.port)]
+    } else {
+        endpoint_addr.ip_addrs().copied().collect()
+    };
 
     // Display connection tickets for each group.
     for group_name in &args.groups {
