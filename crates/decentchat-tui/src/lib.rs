@@ -2,4 +2,14 @@
 //!
 //! Terminal UI using ratatui and crossterm.
 
-// Stub for Phase 1. Full implementation in Phase 4.
+mod app;
+mod error;
+mod input;
+mod render;
+mod run;
+mod terminal;
+mod widgets;
+
+pub use app::{App, AppConfig, ConnectionStatus, DisplayMessage};
+pub use error::TuiError;
+pub use run::run;

@@ -11,3 +11,4 @@ decentchat-protocol.workspace = true
 tokio = { workspace = true, features = ["sync", "macros"] }
 ratatui.workspace = true
 crossterm.workspace = true
+thiserror.workspace = true
