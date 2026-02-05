@@ -2,7 +2,8 @@
 
 use decentchat_core::{ChatEvent, GroupId};
 use decentchat_protocol::{
-    GroupSession, Identity, QuicTransport, QuicTransportConfig, SessionConfig, Transport,
+    BootstrapPeer, GroupSession, Identity, QuicTransport, QuicTransportConfig, SessionConfig,
+    Transport,
 };
 use std::time::Duration;
 use tokio::time::timeout;
@@ -38,6 +39,10 @@ async fn late_joiner_receives_history() {
 
     let node1_addr = transport1.endpoint().addr();
     tracing::info!("Node1 addr: {:?}", node1_addr);
+    let node1_socket_addr = *node1_addr
+        .ip_addrs()
+        .next()
+        .expect("should have direct address");
 
     // Node 1 subscribes and creates session.
     let sub1 = transport1
@@ -75,20 +80,14 @@ async fn late_joiner_receives_history() {
     // Give node1 time to process.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Connect transport2 to transport1.
-    let _conn = transport2
-        .endpoint()
-        .connect(node1_addr, iroh_gossip::net::GOSSIP_ALPN)
-        .await
-        .expect("should connect to node1");
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Node 2 subscribes with node1 as bootstrap.
+    // Node 2 subscribes with node1 as bootstrap (with direct address).
+    let bootstrap = vec![BootstrapPeer::with_addr(node1_id, node1_socket_addr)];
     let sub2 = transport2
-        .subscribe(&group, vec![node1_id])
+        .subscribe(&group, bootstrap)
         .await
         .expect("node2 should subscribe");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut session2, mut events2) = GroupSession::new(
         group.clone(),

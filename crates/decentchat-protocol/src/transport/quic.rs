@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{ProtocolError, Result};
 use crate::identity::Identity;
-use crate::transport::traits::{TopicReceiver, TopicSender, TopicSubscription, Transport, TransportEvent};
+use crate::transport::traits::{BootstrapPeer, TopicReceiver, TopicSender, TopicSubscription, Transport, TransportEvent};
 
 /// Default maximum message size: 64 KiB.
 const DEFAULT_MAX_MESSAGE_SIZE_BYTES: u32 = 64 * 1024;
@@ -138,15 +138,34 @@ impl Transport for QuicTransport {
     async fn subscribe(
         &self,
         group: &GroupId,
-        bootstrap: Vec<NodeId>,
+        bootstrap: Vec<BootstrapPeer>,
     ) -> Result<TopicSubscription> {
         let topic_id = TopicId::from_bytes(group.topic_hash());
+
+        // Connect to bootstrap peers that have direct addresses.
+        for peer in &bootstrap {
+            if let Some(addr) = peer.addr {
+                let public_key = iroh::PublicKey::from_bytes(peer.node_id.as_bytes())
+                    .expect("NodeId must contain valid public key bytes");
+                let endpoint_addr = iroh::EndpointAddr::new(public_key).with_ip_addr(addr);
+
+                // Attempt connection, log but don't fail if it doesn't work.
+                match self.endpoint.connect(endpoint_addr, GOSSIP_ALPN).await {
+                    Ok(_conn) => {
+                        tracing::debug!("connected to bootstrap peer {:?}", peer.node_id);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to connect to bootstrap peer: {}", e);
+                    }
+                }
+            }
+        }
 
         // Convert NodeIds to iroh PublicKeys.
         let bootstrap_keys: Vec<iroh::PublicKey> = bootstrap
             .iter()
-            .map(|node_id| {
-                iroh::PublicKey::from_bytes(node_id.as_bytes())
+            .map(|peer| {
+                iroh::PublicKey::from_bytes(peer.node_id.as_bytes())
                     .expect("NodeId must contain valid public key bytes")
             })
             .collect();

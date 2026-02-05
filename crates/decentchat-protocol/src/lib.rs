@@ -53,6 +53,6 @@ pub use node::Node;
 pub use session::{GroupSession, SessionConfig, SessionEventReceiver};
 pub use sync::SyncState;
 pub use transport::{
-    QuicTransport, QuicTransportConfig, TopicReceiver, TopicSender, TopicSubscription, Transport,
-    TransportEvent,
+    BootstrapPeer, QuicTransport, QuicTransportConfig, TopicReceiver, TopicSender,
+    TopicSubscription, Transport, TransportEvent,
 };

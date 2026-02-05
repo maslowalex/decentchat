@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use decentchat_core::GroupId;
-use decentchat_protocol::{Identity, QuicTransport, QuicTransportConfig, Transport, TransportEvent};
+use decentchat_protocol::{BootstrapPeer, Identity, QuicTransport, QuicTransportConfig, Transport, TransportEvent};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -43,6 +43,10 @@ async fn two_nodes_exchange_bytes() {
     // Get node1's address for bootstrapping before subscribing.
     let node1_addr = transport1.endpoint().addr();
     tracing::info!("Node1 addr: {:?}", node1_addr);
+    let node1_socket_addr = *node1_addr
+        .ip_addrs()
+        .next()
+        .expect("should have direct address");
 
     // Node 1 subscribes first (creates the topic).
     let mut sub1 = transport1
@@ -53,22 +57,16 @@ async fn two_nodes_exchange_bytes() {
     // Give node1 time to set up the topic.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Connect transport2 to transport1 at the iroh level first.
-    // This establishes connectivity so gossip can work.
-    let _conn = transport2
-        .endpoint()
-        .connect(node1_addr, iroh_gossip::net::GOSSIP_ALPN)
+    // Node 2 subscribes with node 1 as bootstrap (with direct address).
+    // The transport will connect to node1 before subscribing to gossip.
+    let bootstrap = vec![BootstrapPeer::with_addr(node1_id, node1_socket_addr)];
+    let sub2 = transport2
+        .subscribe(&group, bootstrap)
         .await
-        .expect("should connect to node1");
+        .expect("node2 should subscribe");
 
     // Small delay after connection.
     tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Node 2 subscribes and joins with node 1 as bootstrap.
-    let sub2 = transport2
-        .subscribe(&group, vec![node1_id])
-        .await
-        .expect("node2 should subscribe");
 
     // Wait for PeerJoined event on node 1 (with shorter timeout).
     let peer_joined_result = timeout(Duration::from_secs(5), async {

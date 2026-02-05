@@ -7,7 +7,7 @@ use decentchat_core::{GroupId, NodeId};
 
 use crate::error::Result;
 use crate::identity::Identity;
-use crate::transport::{TopicSubscription, Transport};
+use crate::transport::{BootstrapPeer, TopicSubscription, Transport};
 
 /// A chat node that can join groups and exchange messages.
 pub struct Node {
@@ -38,12 +38,12 @@ impl Node {
     ///
     /// # Arguments
     /// * `group` - The group to subscribe to.
-    /// * `bootstrap` - Optional list of peer NodeIds to connect to initially.
+    /// * `bootstrap` - Optional list of bootstrap peers to connect to initially.
     ///   Use an empty vec to create a new group or wait for peers to connect.
     pub async fn subscribe(
         &self,
         group: &GroupId,
-        bootstrap: Vec<NodeId>,
+        bootstrap: Vec<BootstrapPeer>,
     ) -> Result<TopicSubscription> {
         self.transport.subscribe(group, bootstrap).await
     }

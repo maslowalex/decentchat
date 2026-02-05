@@ -6,4 +6,4 @@ mod quic;
 mod traits;
 
 pub use quic::{QuicTransport, QuicTransportConfig};
-pub use traits::{TopicReceiver, TopicSender, TopicSubscription, Transport, TransportEvent};
+pub use traits::{BootstrapPeer, TopicReceiver, TopicSender, TopicSubscription, Transport, TransportEvent};

@@ -3,11 +3,34 @@
 //! Defines the abstraction layer between the protocol and the underlying
 //! networking implementation (iroh-gossip).
 
+use std::net::SocketAddr;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use decentchat_core::{GroupId, NodeId};
 
 use crate::error::Result;
+
+/// A peer to bootstrap gossip connections with.
+#[derive(Clone, Debug)]
+pub struct BootstrapPeer {
+    /// The peer's node ID (required).
+    pub node_id: NodeId,
+    /// Direct socket address for connection (optional).
+    pub addr: Option<SocketAddr>,
+}
+
+impl BootstrapPeer {
+    /// Create a bootstrap peer with only a node ID.
+    pub fn new(node_id: NodeId) -> Self {
+        Self { node_id, addr: None }
+    }
+
+    /// Create a bootstrap peer with a node ID and direct address.
+    pub fn with_addr(node_id: NodeId, addr: SocketAddr) -> Self {
+        Self { node_id, addr: Some(addr) }
+    }
+}
 
 /// Events received from the transport layer.
 #[derive(Clone, Debug)]
@@ -67,11 +90,11 @@ pub trait Transport: Send + Sync {
     ///
     /// # Arguments
     /// * `group` - The group to subscribe to.
-    /// * `bootstrap` - Optional list of peer NodeIds to connect to initially.
+    /// * `bootstrap` - Optional list of bootstrap peers to connect to initially.
     async fn subscribe(
         &self,
         group: &GroupId,
-        bootstrap: Vec<NodeId>,
+        bootstrap: Vec<BootstrapPeer>,
     ) -> Result<TopicSubscription>;
 
     /// Gracefully shut down the transport.
