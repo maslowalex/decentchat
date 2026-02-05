@@ -113,13 +113,11 @@ impl QuicTransport {
         while let Some(incoming) = endpoint.accept().await {
             let gossip = gossip.clone();
             tokio::spawn(async move {
-                if let Ok(connection) = incoming.await {
-                    let alpn = connection.alpn();
-                    if alpn.as_ref() == GOSSIP_ALPN {
-                        if let Err(e) = gossip.handle_connection(connection).await {
-                            tracing::warn!("gossip connection error: {e}");
-                        }
-                    }
+                if let Ok(connection) = incoming.await
+                    && connection.alpn() == GOSSIP_ALPN
+                    && let Err(e) = gossip.handle_connection(connection).await
+                {
+                    tracing::warn!("gossip connection error: {e}");
                 }
             });
         }

@@ -40,12 +40,18 @@
 
 pub mod error;
 pub mod identity;
+pub mod messages;
 pub mod node;
+pub mod session;
+pub mod sync;
 pub mod transport;
 
 pub use error::{ProtocolError, Result};
 pub use identity::Identity;
+pub use messages::WireMessage;
 pub use node::Node;
+pub use session::{GroupSession, SessionConfig, SessionEventReceiver};
+pub use sync::SyncState;
 pub use transport::{
     QuicTransport, QuicTransportConfig, TopicReceiver, TopicSender, TopicSubscription, Transport,
     TransportEvent,

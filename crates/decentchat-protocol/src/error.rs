@@ -24,6 +24,14 @@ pub enum ProtocolError {
     /// Error from the iroh networking layer.
     #[error("iroh error: {0}")]
     IrohError(String),
+
+    /// Message serialization or deserialization failed.
+    #[error("serialization error: {0}")]
+    SerializationError(String),
+
+    /// Sync protocol error.
+    #[error("sync error: {0}")]
+    SyncError(String),
 }
 
 /// Convenience Result type for protocol operations.

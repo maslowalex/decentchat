@@ -3,7 +3,6 @@
 //! Each node has a unique identity derived from an Ed25519 keypair.
 //! The secret key can be persisted to disk for identity continuity across restarts.
 
-use std::fmt::Debug;
 use std::path::Path;
 
 use decentchat_core::NodeId;
@@ -67,12 +66,12 @@ impl Identity {
     /// Persist the secret key to a file.
     fn persist(&self, path: &Path) -> Result<()> {
         // Ensure parent directory exists.
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    ProtocolError::IdentityError(format!("failed to create key directory: {e}"))
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ProtocolError::IdentityError(format!("failed to create key directory: {e}"))
+            })?;
         }
 
         std::fs::write(path, self.secret_key.to_bytes())
