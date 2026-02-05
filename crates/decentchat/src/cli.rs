@@ -36,6 +36,9 @@ pub enum Command {
 
     /// Show node information.
     Info,
+
+    /// Start MCP server for AI agent integration (stdio transport).
+    Mcp,
 }
 
 /// Arguments for the join command.

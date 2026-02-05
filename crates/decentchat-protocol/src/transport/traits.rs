@@ -61,7 +61,7 @@ pub trait TopicSender: Send + Sync {
 ///
 /// Receives events from peers in the topic.
 #[async_trait]
-pub trait TopicReceiver: Send {
+pub trait TopicReceiver: Send + Sync {
     /// Receive the next event from the topic.
     ///
     /// Returns None if the subscription has been closed.

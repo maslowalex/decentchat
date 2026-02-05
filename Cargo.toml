@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/decentchat",
     "crates/decentchat-core",
+    "crates/decentchat-mcp",
     "crates/decentchat-protocol",
     "crates/decentchat-tui",
 ]
@@ -21,6 +22,7 @@ categories = ["command-line-utilities", "network-programming"]
 [workspace.dependencies]
 # Internal crates
 decentchat-core = { path = "crates/decentchat-core" }
+decentchat-mcp = { path = "crates/decentchat-mcp" }
 decentchat-protocol = { path = "crates/decentchat-protocol" }
 decentchat-tui = { path = "crates/decentchat-tui" }
 

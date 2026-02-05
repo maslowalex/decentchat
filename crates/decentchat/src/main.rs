@@ -14,6 +14,7 @@ use decentchat_protocol::{
     BootstrapPeer, ConnectionTicket, GroupSession, Identity, QuicTransport, QuicTransportConfig,
     SessionConfig, Transport,
 };
+use decentchat_mcp::McpServer;
 use decentchat_tui::AppConfig;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -38,6 +39,11 @@ async fn main() -> Result<()> {
         }
         Command::Identity(args) => cmd_identity(config_dir, args),
         Command::Info => cmd_info(config_dir),
+        Command::Mcp => {
+            // MCP mode: disable logging to avoid corrupting stdio transport.
+            setup_logging(cli.verbose, true);
+            cmd_mcp(config_dir).await
+        }
     }
 }
 
@@ -355,4 +361,17 @@ fn parse_bootstrap_peers(peers: &[String]) -> Result<Vec<BootstrapPeer>> {
 /// Format NodeId as full hex string.
 fn format_node_id(identity: &Identity) -> String {
     hex::encode(identity.node_id().as_bytes())
+}
+
+/// Start the MCP server for AI agent integration.
+async fn cmd_mcp(config_dir: PathBuf) -> Result<()> {
+    let identity = load_identity(&config_dir)?;
+    let server = McpServer::new(identity, config_dir);
+
+    // Run the MCP server (blocks until shutdown).
+    // Event processing is handled internally when a room is joined.
+    server
+        .run()
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))
 }

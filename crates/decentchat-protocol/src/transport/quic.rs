@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use decentchat_core::{GroupId, NodeId};
 use iroh::Endpoint;
+use iroh::protocol::Router;
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::api::{Event, GossipReceiver, GossipSender};
 use iroh_gossip::TopicId;
@@ -57,7 +58,7 @@ impl QuicTransportConfig {
 
 /// QUIC-based transport using iroh and iroh-gossip.
 pub struct QuicTransport {
-    endpoint: Endpoint,
+    router: Router,
     gossip: Gossip,
     local_node_id: NodeId,
 }
@@ -94,38 +95,22 @@ impl QuicTransport {
 
         let local_node_id = identity.node_id();
 
-        // Spawn a task to handle incoming gossip connections.
-        let gossip_clone = gossip.clone();
-        let endpoint_clone = endpoint.clone();
-        tokio::spawn(async move {
-            Self::accept_loop(endpoint_clone, gossip_clone).await;
-        });
+        // Use the Router to handle incoming gossip connections.
+        // The Gossip type implements ProtocolHandler, so it can be registered directly.
+        let router = Router::builder(endpoint)
+            .accept(GOSSIP_ALPN, gossip.clone())
+            .spawn();
 
         Ok(Self {
-            endpoint,
+            router,
             gossip,
             local_node_id,
         })
     }
 
-    /// Accept incoming connections and route them to the gossip protocol.
-    async fn accept_loop(endpoint: Endpoint, gossip: Gossip) {
-        while let Some(incoming) = endpoint.accept().await {
-            let gossip = gossip.clone();
-            tokio::spawn(async move {
-                if let Ok(connection) = incoming.await
-                    && connection.alpn() == GOSSIP_ALPN
-                    && let Err(e) = gossip.handle_connection(connection).await
-                {
-                    tracing::warn!("gossip connection error: {e}");
-                }
-            });
-        }
-    }
-
     /// Get the iroh Endpoint for advanced use cases (e.g., adding relay info).
     pub fn endpoint(&self) -> &Endpoint {
-        &self.endpoint
+        self.router.endpoint()
     }
 }
 
@@ -142,25 +127,6 @@ impl Transport for QuicTransport {
     ) -> Result<TopicSubscription> {
         let topic_id = TopicId::from_bytes(group.topic_hash());
 
-        // Connect to bootstrap peers that have direct addresses.
-        for peer in &bootstrap {
-            if let Some(addr) = peer.addr {
-                let public_key = iroh::PublicKey::from_bytes(peer.node_id.as_bytes())
-                    .expect("NodeId must contain valid public key bytes");
-                let endpoint_addr = iroh::EndpointAddr::new(public_key).with_ip_addr(addr);
-
-                // Attempt connection, log but don't fail if it doesn't work.
-                match self.endpoint.connect(endpoint_addr, GOSSIP_ALPN).await {
-                    Ok(_conn) => {
-                        tracing::debug!("connected to bootstrap peer {:?}", peer.node_id);
-                    }
-                    Err(e) => {
-                        tracing::warn!("failed to connect to bootstrap peer: {}", e);
-                    }
-                }
-            }
-        }
-
         // Convert NodeIds to iroh PublicKeys.
         let bootstrap_keys: Vec<iroh::PublicKey> = bootstrap
             .iter()
@@ -170,13 +136,36 @@ impl Transport for QuicTransport {
             })
             .collect();
 
-        // Use subscribe (not subscribe_and_join) to avoid blocking on peer connectivity.
-        // This returns immediately. Peer connections will be established asynchronously.
+        // Subscribe to the topic first, then connect to bootstrap peers.
+        // This ensures the gossip protocol is ready to receive connections.
         let gossip_topic = self
             .gossip
             .subscribe(topic_id, bootstrap_keys)
             .await
             .map_err(|e| ProtocolError::SubscribeFailed(e.to_string()))?;
+
+        // Now connect to bootstrap peers that have direct addresses.
+        // The gossip protocol will use these connections.
+        for peer in &bootstrap {
+            if let Some(addr) = peer.addr {
+                let public_key = iroh::PublicKey::from_bytes(peer.node_id.as_bytes())
+                    .expect("NodeId must contain valid public key bytes");
+                let endpoint_addr = iroh::EndpointAddr::new(public_key).with_ip_addr(addr);
+
+                match self.endpoint().connect(endpoint_addr, GOSSIP_ALPN).await {
+                    Ok(conn) => {
+                        tracing::debug!("connected to bootstrap peer {:?}", peer.node_id);
+                        // Pass the connection to gossip to handle.
+                        if let Err(e) = self.gossip.handle_connection(conn).await {
+                            tracing::warn!("gossip handle_connection error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to connect to bootstrap peer: {}", e);
+                    }
+                }
+            }
+        }
 
         let (sender, receiver) = gossip_topic.split();
 
@@ -189,11 +178,11 @@ impl Transport for QuicTransport {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        self.gossip
+        // Router shutdown will also shutdown gossip and close the endpoint.
+        self.router
             .shutdown()
             .await
             .map_err(|e| ProtocolError::IrohError(e.to_string()))?;
-        self.endpoint.close().await;
         Ok(())
     }
 }

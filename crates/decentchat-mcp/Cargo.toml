@@ -1,0 +1,21 @@
+[package]
+name = "decentchat-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP server for AI agent integration with DecentChat"
+
+[dependencies]
+decentchat-core.workspace = true
+decentchat-protocol.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json = "1"
+thiserror.workspace = true
+tracing.workspace = true
+hex.workspace = true
+
+rmcp = { version = "0.14", features = ["server", "transport-io", "macros", "schemars"] }
+schemars = "1"

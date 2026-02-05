@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 decentchat-core.workspace = true
+decentchat-mcp.workspace = true
 decentchat-protocol.workspace = true
 decentchat-tui.workspace = true
 
