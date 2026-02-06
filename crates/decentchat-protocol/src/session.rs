@@ -3,6 +3,7 @@
 //! Bridges the transport layer to the core CRDT state, handling message
 //! encoding/decoding, sync protocol, and event emission.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -70,7 +71,7 @@ pub struct GroupSession {
     local_node: NodeId,
     config: SessionConfig,
     event_sender: mpsc::Sender<ChatEvent>,
-    connected_peer_count: usize,
+    connected_peers: HashSet<NodeId>,
     last_presence_broadcast: Option<std::time::Instant>,
     /// Tracks an in-flight re-sync request (sent from Active state after reconnection).
     /// Cleared on response or timeout. Separate from the initial sync state machine.
@@ -96,7 +97,7 @@ impl GroupSession {
             local_node,
             config,
             event_sender,
-            connected_peer_count: 0,
+            connected_peers: HashSet::new(),
             last_presence_broadcast: None,
             resync_requested_at: None,
         };
@@ -135,7 +136,7 @@ impl GroupSession {
 
     /// Get the number of connected peers.
     pub fn peer_count(&self) -> usize {
-        self.connected_peer_count
+        self.connected_peers.len()
     }
 
     /// Mark sync as complete (for first peer or testing).
@@ -426,6 +427,12 @@ impl GroupSession {
                     .await;
                 }
             }
+            // Trigger members list refresh after re-sync merges user entries.
+            self.emit_event(ChatEvent::PresenceUpdated {
+                group: self.state.id.clone(),
+                node: from,
+            })
+            .await;
         } else if self.sync_state.is_syncing() {
             // Initial sync response: transitioning from Syncing to Active.
             let message_count = messages.len();
@@ -442,9 +449,28 @@ impl GroupSession {
             }
         } else {
             // Late or unexpected response (Active, no resync pending).
-            // Merge silently into CRDT to maintain consistency.
-            debug!("received late sync response from {}, merging silently", from);
-            self.state.merge(messages, users);
+            // Merge into CRDT and emit events so TUI stays in sync.
+            debug!("received late sync response from {}, merging with events", from);
+            for (node, entry) in users {
+                self.state.clock.receive(&entry.updated_at);
+                self.state.users.insert(node, entry);
+            }
+            for msg in messages {
+                self.state.clock.receive(&msg.timestamp);
+                let is_new = self.state.messages.insert(msg.clone());
+                if is_new {
+                    self.emit_event(ChatEvent::MessageReceived {
+                        group: self.state.id.clone(),
+                        message: msg,
+                    })
+                    .await;
+                }
+            }
+            self.emit_event(ChatEvent::PresenceUpdated {
+                group: self.state.id.clone(),
+                node: from,
+            })
+            .await;
         }
     }
 
@@ -471,8 +497,8 @@ impl GroupSession {
     async fn handle_peer_joined(&mut self, peer: NodeId) {
         debug!("peer joined: {}", peer);
 
-        let was_disconnected = self.connected_peer_count == 0;
-        self.connected_peer_count += 1;
+        let was_disconnected = self.connected_peers.is_empty();
+        self.connected_peers.insert(peer);
 
         if self.sync_state.is_joining()
             && self.config.request_sync_on_join
@@ -510,7 +536,7 @@ impl GroupSession {
 
         self.emit_event(ChatEvent::ConnectionChanged {
             connected: true,
-            peer_count: self.connected_peer_count,
+            peer_count: self.connected_peers.len(),
         })
         .await;
     }
@@ -518,7 +544,7 @@ impl GroupSession {
     async fn handle_peer_left(&mut self, peer: NodeId) {
         debug!("peer left: {}", peer);
 
-        self.connected_peer_count = self.connected_peer_count.saturating_sub(1);
+        self.connected_peers.remove(&peer);
 
         self.emit_event(ChatEvent::UserLeft {
             group: self.state.id.clone(),
@@ -527,8 +553,8 @@ impl GroupSession {
         .await;
 
         self.emit_event(ChatEvent::ConnectionChanged {
-            connected: self.connected_peer_count > 0,
-            peer_count: self.connected_peer_count,
+            connected: !self.connected_peers.is_empty(),
+            peer_count: self.connected_peers.len(),
         })
         .await;
     }

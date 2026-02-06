@@ -22,6 +22,12 @@ const PRESENCE_TIMEOUT_MS: u64 = 90_000;
 /// Poll interval for terminal events.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Actions that must be executed on &mut session after event handling.
+enum DeferredAction {
+    /// Re-broadcast the local username so new/reconnected peers learn it.
+    RebroadcastUsername,
+}
+
 /// Run the TUI application.
 ///
 /// Takes ownership of the session and event receiver.
@@ -33,7 +39,13 @@ pub async fn run(
 ) -> Result<()> {
     let mut terminal = init()?;
     let local_node = session.local_node();
+    let username = config.username.clone();
     let mut app = App::new(config, local_node);
+
+    // Register username locally and broadcast to peers.
+    if let Err(e) = session.set_username(username).await {
+        app.add_message(DisplayMessage::system(format!("Failed to set username: {}", e)));
+    }
 
     // Request sync if joining.
     if let Err(e) = session.request_sync().await {
@@ -83,7 +95,10 @@ async fn run_loop(
 
             // Protocol events (chat messages, user events).
             Some(chat_event) = events.recv() => {
-                handle_chat_event(app, session, chat_event);
+                let deferred = handle_chat_event(app, session, chat_event);
+                if let Some(action) = deferred {
+                    execute_deferred(app, session, action).await;
+                }
             }
 
             // Drive session processing.
@@ -197,7 +212,10 @@ async fn handle_command(app: &mut App, session: &mut GroupSession, cmd: Command)
 }
 
 /// Handle a chat event from the protocol layer.
-fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) {
+///
+/// Returns a deferred action when the event requires mutating the session
+/// (which is borrowed immutably here for display_name lookups).
+fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) -> Option<DeferredAction> {
     match event {
         ChatEvent::MessageReceived { message, .. } => {
             let author_name = session.state().display_name(&message.author());
@@ -244,6 +262,8 @@ fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) {
                 if message_count == 1 { "" } else { "s" }
             )));
             update_members(app, session);
+            // Re-broadcast username so peers that joined before us learn our name.
+            return Some(DeferredAction::RebroadcastUsername);
         }
 
         ChatEvent::ConnectionChanged { connected, peer_count } => {
@@ -256,6 +276,23 @@ fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) {
 
         ChatEvent::PresenceUpdated { .. } => {
             update_members(app, session);
+        }
+    }
+
+    None
+}
+
+/// Execute a deferred action that requires &mut session.
+async fn execute_deferred(app: &mut App, session: &mut GroupSession, action: DeferredAction) {
+    match action {
+        DeferredAction::RebroadcastUsername => {
+            let username = app.config().username.clone();
+            if let Err(e) = session.set_username(username).await {
+                app.add_message(DisplayMessage::system(format!(
+                    "Failed to re-broadcast username: {}",
+                    e
+                )));
+            }
         }
     }
 }

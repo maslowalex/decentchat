@@ -202,6 +202,11 @@ impl App {
         self.local_node
     }
 
+    /// Get the app configuration.
+    pub fn config(&self) -> &AppConfig {
+        &self.config
+    }
+
     /// Check if the app should quit.
     pub fn should_quit(&self) -> bool {
         self.should_quit

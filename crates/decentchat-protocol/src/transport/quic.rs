@@ -214,13 +214,16 @@ impl TopicReceiver for QuicTopicReceiver {
         use futures_lite::StreamExt;
 
         let mut receiver = self.inner.lock().await;
-        match receiver.next().await {
-            Some(Ok(event)) => Some(convert_event(event)),
-            Some(Err(e)) => {
-                tracing::warn!("gossip receive error: {e}");
-                None
+        loop {
+            match receiver.next().await {
+                Some(Ok(event)) => return Some(convert_event(event)),
+                Some(Err(e)) => {
+                    // Transient gossip error — the stream continues.
+                    tracing::warn!("gossip receive error (continuing): {e}");
+                    continue;
+                }
+                None => return None,
             }
-            None => None,
         }
     }
 }
