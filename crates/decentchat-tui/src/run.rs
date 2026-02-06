@@ -230,6 +230,14 @@ fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) {
         ChatEvent::SyncCompleted { message_count, .. } => {
             let peer_count = session.peer_count();
             app.set_status(ConnectionStatus::Connected { peer_count });
+
+            // Display all synced messages so the user can see chat history.
+            for msg in session.state().messages.iter() {
+                let author_name = session.state().display_name(&msg.author());
+                let display = DisplayMessage::from_message(msg, author_name, app.local_node());
+                app.add_message(display);
+            }
+
             app.add_message(DisplayMessage::system(format!(
                 "Synced {} message{}",
                 message_count,

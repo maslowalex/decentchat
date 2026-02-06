@@ -72,6 +72,9 @@ pub struct GroupSession {
     event_sender: mpsc::Sender<ChatEvent>,
     connected_peer_count: usize,
     last_presence_broadcast: Option<std::time::Instant>,
+    /// Tracks an in-flight re-sync request (sent from Active state after reconnection).
+    /// Cleared on response or timeout. Separate from the initial sync state machine.
+    resync_requested_at: Option<std::time::Instant>,
 }
 
 impl GroupSession {
@@ -95,6 +98,7 @@ impl GroupSession {
             event_sender,
             connected_peer_count: 0,
             last_presence_broadcast: None,
+            resync_requested_at: None,
         };
 
         let receiver = SessionEventReceiver {
@@ -184,6 +188,7 @@ impl GroupSession {
     /// Returns Some(()) if an event was processed, None if the transport closed.
     pub async fn process_event(&mut self) -> Option<()> {
         self.check_sync_timeout().await;
+        self.check_resync_timeout();
         self.maybe_broadcast_presence().await;
 
         let event = self.subscription.receiver.recv().await?;
@@ -223,6 +228,31 @@ impl GroupSession {
         }
 
         self.sync_state.start_sync();
+
+        let wire = WireMessage::SyncRequest {
+            since: self.state.messages.latest_timestamp().copied(),
+            from: self.local_node,
+        };
+
+        self.broadcast_wire_message(&wire).await
+    }
+
+    /// Request re-sync from peers while in Active state.
+    ///
+    /// Used after reconnection to fetch messages missed while disconnected.
+    /// Separate from the initial sync state machine (Joining -> Syncing -> Active).
+    async fn request_resync(&mut self) -> Result<()> {
+        assert!(
+            self.sync_state.is_active(),
+            "request_resync called in non-Active state"
+        );
+
+        // Guard against duplicate requests.
+        if self.resync_requested_at.is_some() {
+            return Ok(());
+        }
+
+        self.resync_requested_at = Some(std::time::Instant::now());
 
         let wire = WireMessage::SyncRequest {
             since: self.state.messages.latest_timestamp().copied(),
@@ -376,17 +406,45 @@ impl GroupSession {
             users.len()
         );
 
-        let message_count = messages.len();
-        self.state.merge(messages, users);
+        if self.resync_requested_at.is_some() {
+            // Re-sync response: node is already Active.
+            // Merge users first so display names are available for message events.
+            self.resync_requested_at = None;
+            for (node, entry) in users {
+                self.state.clock.receive(&entry.updated_at);
+                self.state.users.insert(node, entry);
+            }
+            // Insert messages individually, emitting MessageReceived for new ones.
+            for msg in messages {
+                self.state.clock.receive(&msg.timestamp);
+                let is_new = self.state.messages.insert(msg.clone());
+                if is_new {
+                    self.emit_event(ChatEvent::MessageReceived {
+                        group: self.state.id.clone(),
+                        message: msg,
+                    })
+                    .await;
+                }
+            }
+        } else if self.sync_state.is_syncing() {
+            // Initial sync response: transitioning from Syncing to Active.
+            let message_count = messages.len();
+            self.state.merge(messages, users);
 
-        let is_first = self.sync_state.record_sync_response(from);
-        if is_first {
-            self.sync_state.complete_sync();
-            self.emit_event(ChatEvent::SyncCompleted {
-                group: self.state.id.clone(),
-                message_count,
-            })
-            .await;
+            let is_first = self.sync_state.record_sync_response(from);
+            if is_first {
+                self.sync_state.complete_sync();
+                self.emit_event(ChatEvent::SyncCompleted {
+                    group: self.state.id.clone(),
+                    message_count,
+                })
+                .await;
+            }
+        } else {
+            // Late or unexpected response (Active, no resync pending).
+            // Merge silently into CRDT to maintain consistency.
+            debug!("received late sync response from {}, merging silently", from);
+            self.state.merge(messages, users);
         }
     }
 
@@ -423,10 +481,22 @@ impl GroupSession {
             warn!("failed to request sync: {}", e);
         }
 
+        // If syncing and a new peer joins, resend the request so they can respond.
+        // The original request may have been broadcast before any peer was connected.
+        if self.sync_state.is_syncing() {
+            let wire = WireMessage::SyncRequest {
+                since: self.state.messages.latest_timestamp().copied(),
+                from: self.local_node,
+            };
+            if let Err(e) = self.broadcast_wire_message(&wire).await {
+                warn!("failed to resend sync request to new peer: {}", e);
+            }
+        }
+
         // If we were disconnected and now have a peer, request re-sync.
         if was_disconnected && self.sync_state.is_active() {
             debug!("reconnected, requesting re-sync");
-            if let Err(e) = self.request_sync().await {
+            if let Err(e) = self.request_resync().await {
                 warn!("failed to request re-sync: {}", e);
             }
         }
@@ -472,6 +542,19 @@ impl GroupSession {
                 message_count: 0,
             })
             .await;
+        }
+    }
+
+    /// Clear a resync request that has timed out.
+    ///
+    /// A re-sync timeout is not fatal: the node is already Active and can continue
+    /// operating. The resync flag is simply cleared so a future reconnection can retry.
+    fn check_resync_timeout(&mut self) {
+        if let Some(requested_at) = self.resync_requested_at {
+            if requested_at.elapsed() >= self.config.sync_timeout {
+                debug!("resync timeout reached, clearing request");
+                self.resync_requested_at = None;
+            }
         }
     }
 
