@@ -98,8 +98,8 @@ impl Widget for MessageList<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn empty_list_shows_placeholder() {

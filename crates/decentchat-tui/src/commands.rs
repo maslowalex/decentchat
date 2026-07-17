@@ -145,6 +145,9 @@ mod tests {
     #[test]
     fn parse_case_insensitive() {
         assert_eq!(parse("/QUIT"), ParseResult::Command(Command::Quit));
-        assert_eq!(parse("/Nick Alice"), ParseResult::Command(Command::Nick("Alice".to_string())));
+        assert_eq!(
+            parse("/Nick Alice"),
+            ParseResult::Command(Command::Nick("Alice".to_string()))
+        );
     }
 }

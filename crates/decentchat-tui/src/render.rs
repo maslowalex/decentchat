@@ -36,7 +36,7 @@ fn create_vertical_layout(area: Rect) -> Vec<Rect> {
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),        // Messages (flexible, at least 3 lines).
+            Constraint::Min(3), // Messages (flexible, at least 3 lines).
             Constraint::Length(INPUT_HEIGHT),
             Constraint::Length(STATUS_HEIGHT),
         ])
@@ -49,7 +49,7 @@ fn create_horizontal_layout(area: Rect) -> Vec<Rect> {
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min(20),           // Messages (flexible).
+            Constraint::Min(20), // Messages (flexible).
             Constraint::Length(SIDEBAR_WIDTH),
         ])
         .split(area)

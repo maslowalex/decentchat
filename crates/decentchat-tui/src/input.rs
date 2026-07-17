@@ -86,7 +86,10 @@ mod tests {
 
     #[test]
     fn char_inserts() {
-        assert_eq!(map_key_event(key(KeyCode::Char('a'))), Action::InsertChar('a'));
+        assert_eq!(
+            map_key_event(key(KeyCode::Char('a'))),
+            Action::InsertChar('a')
+        );
     }
 
     #[test]
@@ -99,8 +102,14 @@ mod tests {
 
     #[test]
     fn page_scrolls() {
-        assert_eq!(map_key_event(key(KeyCode::PageUp)), Action::ScrollUp(PAGE_SCROLL_LINES));
-        assert_eq!(map_key_event(key(KeyCode::PageDown)), Action::ScrollDown(PAGE_SCROLL_LINES));
+        assert_eq!(
+            map_key_event(key(KeyCode::PageUp)),
+            Action::ScrollUp(PAGE_SCROLL_LINES)
+        );
+        assert_eq!(
+            map_key_event(key(KeyCode::PageDown)),
+            Action::ScrollDown(PAGE_SCROLL_LINES)
+        );
     }
 
     #[test]

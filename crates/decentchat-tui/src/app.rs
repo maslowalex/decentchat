@@ -55,7 +55,7 @@ impl DisplayMessage {
     /// Create a new display message from a core Message.
     pub fn from_message(msg: &Message, author_name: String, local_node: NodeId) -> Self {
         let is_local = msg.author() == local_node;
-        let timestamp_display = format_timestamp(msg.timestamp.wall_time);
+        let timestamp_display = format_timestamp(msg.sent_at_ms);
 
         Self {
             author_name,

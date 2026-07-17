@@ -17,9 +17,9 @@ pub enum McpError {
     #[error("invalid ticket: {0}")]
     InvalidTicket(String),
 
-    /// Protocol error.
-    #[error("protocol error: {0}")]
-    Protocol(#[from] decentchat_protocol::ProtocolError),
+    /// Guardian adapter error.
+    #[error("Guardian room error: {0}")]
+    Guardian(#[from] decentchat_guardian::GuardianAdapterError),
 
     /// Transport error.
     #[error("transport error: {0}")]

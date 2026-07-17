@@ -1,26 +1,25 @@
 [package]
-name = "decentchat-protocol"
+name = "decentchat-guardian"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 decentchat-core.workspace = true
-
+guardian-db.workspace = true
+iroh.workspace = true
+iroh-docs.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
-iroh.workspace = true
-iroh-gossip.workspace = true
-postcard.workspace = true
 serde.workspace = true
-data-encoding.workspace = true
-bytes.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-futures-lite.workspace = true
-rand.workspace = true
+uuid.workspace = true
+blake3.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
-tokio-test.workspace = true
 tempfile.workspace = true
-tracing-subscriber.workspace = true

@@ -23,8 +23,11 @@ pub enum ChatEvent {
         username: String,
     },
 
-    /// Sync completed (late joiner caught up).
-    SyncCompleted { group: GroupId, message_count: usize },
+    /// Guardian's initial local room projection is available.
+    SyncCompleted {
+        group: GroupId,
+        message_count: usize,
+    },
 
     /// Connection status changed.
     ConnectionChanged { connected: bool, peer_count: usize },

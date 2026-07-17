@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 decentchat-core.workspace = true
-decentchat-protocol.workspace = true
+decentchat-guardian.workspace = true
 
 tokio = { workspace = true, features = ["sync", "macros"] }
 ratatui.workspace = true

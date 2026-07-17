@@ -9,9 +9,9 @@ pub enum TuiError {
     #[error("terminal error: {0}")]
     Terminal(#[from] std::io::Error),
 
-    /// Protocol layer error.
-    #[error("protocol error: {0}")]
-    Protocol(#[from] decentchat_protocol::ProtocolError),
+    /// Guardian room error.
+    #[error("Guardian room error: {0}")]
+    Guardian(#[from] decentchat_guardian::GuardianAdapterError),
 }
 
 /// Convenience Result type for TUI operations.

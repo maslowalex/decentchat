@@ -8,7 +8,7 @@ pub struct JoinRoomArgs {
     /// Room name to join.
     #[serde(default)]
     pub room: Option<String>,
-    /// Connection ticket (alternative to room name).
+    /// Raw Guardian ticket (alternative to room name).
     #[serde(default)]
     pub ticket: Option<String>,
     /// Initial nickname.
@@ -37,7 +37,7 @@ pub struct JoinRoomResult {
     pub success: bool,
     /// Room name joined.
     pub room: String,
-    /// Connection ticket for sharing.
+    /// Raw Guardian ticket for sharing.
     pub ticket: String,
     /// Error message if failed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,7 +105,7 @@ pub struct MessageInfo {
 pub struct GetTicketResult {
     /// Whether operation was successful.
     pub success: bool,
-    /// Connection ticket.
+    /// Raw Guardian ticket.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
     /// Error message if failed.

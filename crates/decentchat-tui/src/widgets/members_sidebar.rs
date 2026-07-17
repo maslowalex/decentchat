@@ -67,8 +67,7 @@ impl Widget for MembersSidebar<'_> {
             self.members.iter().map(|m| self.format_member(m)).collect()
         };
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(self.title));
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(self.title));
 
         Widget::render(list, area, buf);
     }
@@ -78,8 +77,8 @@ impl Widget for MembersSidebar<'_> {
 mod tests {
     use super::*;
     use decentchat_core::NodeId;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn make_node(id: u8) -> NodeId {
         let mut bytes = [0u8; 32];

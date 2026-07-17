@@ -1,16 +1,16 @@
 //! Async event loop.
 //!
-//! Multiplexes terminal and protocol events using tokio::select!.
+//! Multiplexes terminal and Guardian projection events using tokio::select!.
 
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEventKind};
-use decentchat_core::ChatEvent;
-use decentchat_protocol::{GroupSession, SessionEventReceiver};
+use decentchat_core::{ChatEvent, Member, Presence};
+use decentchat_guardian::{RoomSession, SessionEventReceiver};
 use tokio::sync::mpsc;
 
 use crate::app::{App, AppConfig, ConnectionStatus, DisplayMessage, MemberInfo, PresenceStatus};
-use crate::commands::{self, Command, ParseResult, HELP_TEXT};
+use crate::commands::{self, Command, HELP_TEXT, ParseResult};
 use crate::error::Result;
 use crate::input::{Action, map_key_event};
 use crate::render::render;
@@ -33,7 +33,7 @@ enum DeferredAction {
 /// Takes ownership of the session and event receiver.
 /// Returns when the user quits or an error occurs.
 pub async fn run(
-    mut session: GroupSession,
+    mut session: RoomSession,
     mut events: SessionEventReceiver,
     config: AppConfig,
 ) -> Result<()> {
@@ -44,12 +44,18 @@ pub async fn run(
 
     // Register username locally and broadcast to peers.
     if let Err(e) = session.set_username(username).await {
-        app.add_message(DisplayMessage::system(format!("Failed to set username: {}", e)));
+        app.add_message(DisplayMessage::system(format!(
+            "Failed to set username: {}",
+            e
+        )));
     }
 
     // Request sync if joining.
     if let Err(e) = session.request_sync().await {
-        app.add_message(DisplayMessage::system(format!("Sync request failed: {}", e)));
+        app.add_message(DisplayMessage::system(format!(
+            "Sync request failed: {}",
+            e
+        )));
     } else {
         app.set_status(ConnectionStatus::Syncing);
     }
@@ -69,7 +75,7 @@ pub async fn run(
 async fn run_loop(
     terminal: &mut Tui,
     app: &mut App,
-    session: &mut GroupSession,
+    session: &mut RoomSession,
     events: &mut SessionEventReceiver,
 ) -> Result<()> {
     // Channel for terminal events from blocking thread.
@@ -93,7 +99,7 @@ async fn run_loop(
                 handle_terminal_event(app, session, event).await?;
             }
 
-            // Protocol events (chat messages, user events).
+            // Guardian projection events (chat messages and members).
             Some(chat_event) = events.recv() => {
                 let deferred = handle_chat_event(app, session, chat_event);
                 if let Some(action) = deferred {
@@ -103,8 +109,10 @@ async fn run_loop(
 
             // Drive session processing.
             result = session.process_event() => {
-                if result.is_none() {
-                    app.set_status(ConnectionStatus::Disconnected);
+                match result {
+                    None => app.set_status(ConnectionStatus::Disconnected),
+                    Some(Err(error)) => app.add_message(DisplayMessage::system(format!("Guardian projection error: {error}"))),
+                    Some(Ok(())) => {}
                 }
             }
         }
@@ -136,7 +144,7 @@ fn spawn_terminal_reader(tx: mpsc::Sender<Event>) {
 /// Handle a terminal event (keyboard input).
 async fn handle_terminal_event(
     app: &mut App,
-    session: &mut GroupSession,
+    session: &mut RoomSession,
     event: Event,
 ) -> Result<()> {
     if let Event::Key(key) = event {
@@ -162,7 +170,7 @@ async fn handle_terminal_event(
 }
 
 /// Submit the current input as a chat message or command.
-async fn submit_message(app: &mut App, session: &mut GroupSession) {
+async fn submit_message(app: &mut App, session: &mut RoomSession) {
     let input = app.take_input();
 
     match commands::parse(&input) {
@@ -185,7 +193,7 @@ async fn submit_message(app: &mut App, session: &mut GroupSession) {
 }
 
 /// Handle a parsed slash command.
-async fn handle_command(app: &mut App, session: &mut GroupSession, cmd: Command) {
+async fn handle_command(app: &mut App, session: &mut RoomSession, cmd: Command) {
     match cmd {
         Command::Nick(new_name) => {
             if let Err(e) = session.set_username(new_name).await {
@@ -211,11 +219,15 @@ async fn handle_command(app: &mut App, session: &mut GroupSession, cmd: Command)
     }
 }
 
-/// Handle a chat event from the protocol layer.
+/// Handle a chat event from the Guardian session boundary.
 ///
 /// Returns a deferred action when the event requires mutating the session
 /// (which is borrowed immutably here for display_name lookups).
-fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) -> Option<DeferredAction> {
+fn handle_chat_event(
+    app: &mut App,
+    session: &RoomSession,
+    event: ChatEvent,
+) -> Option<DeferredAction> {
     match event {
         ChatEvent::MessageReceived { message, .. } => {
             let author_name = session.state().display_name(&message.author());
@@ -238,9 +250,15 @@ fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) ->
         ChatEvent::UsernameChanged { node, username, .. } => {
             let is_local = node == app.local_node();
             if is_local {
-                app.add_message(DisplayMessage::system(format!("You are now known as {}", username)));
+                app.add_message(DisplayMessage::system(format!(
+                    "You are now known as {}",
+                    username
+                )));
             } else {
-                app.add_message(DisplayMessage::system(format!("User is now known as {}", username)));
+                app.add_message(DisplayMessage::system(format!(
+                    "User is now known as {}",
+                    username
+                )));
             }
             update_members(app, session);
         }
@@ -266,7 +284,10 @@ fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) ->
             return Some(DeferredAction::RebroadcastUsername);
         }
 
-        ChatEvent::ConnectionChanged { connected, peer_count } => {
+        ChatEvent::ConnectionChanged {
+            connected,
+            peer_count,
+        } => {
             if connected {
                 app.set_status(ConnectionStatus::Connected { peer_count });
             } else {
@@ -283,7 +304,7 @@ fn handle_chat_event(app: &mut App, session: &GroupSession, event: ChatEvent) ->
 }
 
 /// Execute a deferred action that requires &mut session.
-async fn execute_deferred(app: &mut App, session: &mut GroupSession, action: DeferredAction) {
+async fn execute_deferred(app: &mut App, session: &mut RoomSession, action: DeferredAction) {
     match action {
         DeferredAction::RebroadcastUsername => {
             let username = app.config().username.clone();
@@ -298,21 +319,23 @@ async fn execute_deferred(app: &mut App, session: &mut GroupSession, action: Def
 }
 
 /// Update the members list from session state.
-fn update_members(app: &mut App, session: &GroupSession) {
+fn update_members(app: &mut App, session: &RoomSession) {
     let state = session.state();
     let local_node = app.local_node();
     let now_ms = current_time_millis();
 
     let mut members: Vec<MemberInfo> = state
-        .users
-        .nodes()
-        .map(|node| {
-            let display_name = state.display_name(node);
-            let is_local = *node == local_node;
-            let presence_status = compute_presence_status(&state.users, node, now_ms);
+        .members
+        .values()
+        .filter(|member| !member.offline)
+        .map(|member| {
+            let node = member.node_id;
+            let display_name = state.display_name(&node);
+            let is_local = node == local_node;
+            let presence_status = compute_presence_status(member, now_ms);
 
             MemberInfo {
-                node_id: *node,
+                node_id: node,
                 display_name,
                 is_local,
                 presence_status,
@@ -327,7 +350,9 @@ fn update_members(app: &mut App, session: &GroupSession) {
         } else if !a.is_local && b.is_local {
             std::cmp::Ordering::Greater
         } else {
-            a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase())
+            a.display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase())
         }
     });
 
@@ -335,21 +360,11 @@ fn update_members(app: &mut App, session: &GroupSession) {
 }
 
 /// Compute presence status based on last_seen timestamp.
-fn compute_presence_status(
-    users: &decentchat_core::UserRegistry,
-    node: &decentchat_core::NodeId,
-    now_ms: u64,
-) -> PresenceStatus {
-    match users.last_seen(node) {
-        Some(last_seen) => {
-            let elapsed = now_ms.saturating_sub(last_seen);
-            if elapsed < PRESENCE_TIMEOUT_MS {
-                PresenceStatus::Online
-            } else {
-                PresenceStatus::Away
-            }
-        }
-        None => PresenceStatus::Unknown,
+fn compute_presence_status(member: &Member, now_ms: u64) -> PresenceStatus {
+    match member.presence_at(now_ms, PRESENCE_TIMEOUT_MS) {
+        Presence::Online => PresenceStatus::Online,
+        Presence::Away => PresenceStatus::Away,
+        Presence::Offline => PresenceStatus::Unknown,
     }
 }
 

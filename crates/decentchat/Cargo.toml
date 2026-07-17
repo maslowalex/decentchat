@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 decentchat-core.workspace = true
 decentchat-mcp.workspace = true
-decentchat-protocol.workspace = true
+decentchat-guardian.workspace = true
 decentchat-tui.workspace = true
 
 tokio.workspace = true
@@ -26,5 +26,3 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
-serde.workspace = true
-hex.workspace = true

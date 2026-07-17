@@ -1,36 +1,32 @@
-//! MCP server implementation for DecentChat.
+//! MCP server implementation for DecentChat's Guardian room boundary.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-use decentchat_core::{ChatEvent, GroupId, Message};
-use decentchat_protocol::{
-    BootstrapPeer, ConnectionTicket, GroupSession, Identity, QuicTransport, QuicTransportConfig,
-    SessionConfig, SessionEventReceiver, Transport,
-};
+use decentchat_core::{ChatEvent, Message};
+use decentchat_guardian::{GuardianNode, RoomSession, SessionConfig, SessionEventReceiver};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    AnnotateAble, ListResourcesResult, RawResource, ReadResourceRequestParams,
-    ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
+    AnnotateAble, ListResourcesResult, RawResource, ReadResourceRequestParams, ReadResourceResult,
+    ResourceContents, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
+use rmcp::{
+    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::resources::{uri, MessagesResource, StatusResource, UsersResource};
+use crate::resources::{MessagesResource, StatusResource, UsersResource, uri};
 use crate::tools::{
     GetNewMessagesResult, GetTicketResult, JoinRoomResult, LeaveRoomResult, MessageInfo,
     SendMessageResult, SetNicknameResult, StatusInfo, UserInfo,
 };
 
-/// Maximum number of messages to keep for polling.
 const MAX_MESSAGE_HISTORY: usize = 100;
 
-/// Commands sent to the session task.
 enum SessionCommand {
     SendMessage {
         content: String,
@@ -48,40 +44,26 @@ enum SessionCommand {
     },
 }
 
-/// Request to join a room (sent to a spawned task).
-struct JoinRequest {
-    room_name: String,
-    bootstrap: Vec<BootstrapPeer>,
-    nickname: Option<String>,
-    reply: oneshot::Sender<Result<JoinResult, String>>,
-}
-
-/// Result of a successful join.
 struct JoinResult {
+    room_name: String,
     ticket: String,
     cmd_tx: mpsc::Sender<SessionCommand>,
     initial_status: SessionStatus,
 }
 
-/// Status information about the session.
 #[derive(Clone)]
 struct SessionStatus {
     room_name: String,
     nickname: Option<String>,
     peer_count: usize,
     synced: bool,
-    ip_addrs: Vec<SocketAddr>,
+    ticket: String,
 }
 
-/// State shared between the server and the session task.
 struct SharedState {
-    /// Message buffer for polling.
     messages: Mutex<Vec<MessageInfo>>,
-    /// Last poll index for get_new_messages.
     last_poll_index: Mutex<usize>,
-    /// Session command sender (None if not connected).
     session_cmd: RwLock<Option<mpsc::Sender<SessionCommand>>>,
-    /// Current session status.
     status: RwLock<Option<SessionStatus>>,
 }
 
@@ -96,25 +78,22 @@ impl SharedState {
     }
 }
 
-/// MCP server for DecentChat AI agent integration.
 #[derive(Clone)]
 pub struct McpServer {
-    identity: Arc<Identity>,
+    node: GuardianNode,
     state: Arc<SharedState>,
     tool_router: ToolRouter<Self>,
 }
 
 impl McpServer {
-    /// Create a new MCP server.
-    pub fn new(identity: Identity, _config_dir: std::path::PathBuf) -> Self {
+    pub fn new(node: GuardianNode) -> Self {
         Self {
-            identity: Arc::new(identity),
+            node,
             state: Arc::new(SharedState::new()),
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Run the MCP server with stdio transport.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting MCP server");
         let service = self.serve(rmcp::transport::stdio()).await?;
@@ -122,142 +101,84 @@ impl McpServer {
         Ok(())
     }
 
-    /// Join a chat room.
     async fn do_join_room(&self, params: JoinRoomParams) -> JoinRoomResult {
-        // Check if already connected.
+        if let Some(status) = self.state.status.read().await.as_ref() {
+            return JoinRoomResult {
+                success: false,
+                room: status.room_name.clone(),
+                ticket: String::new(),
+                error: Some(format!("already connected to room: {}", status.room_name)),
+            };
+        }
+        if params.room.is_some() == params.ticket.is_some() {
+            return JoinRoomResult {
+                success: false,
+                room: String::new(),
+                ticket: String::new(),
+                error: Some("provide exactly one of room or ticket".into()),
+            };
+        }
+        if params
+            .room
+            .as_deref()
+            .is_some_and(|room| room.trim().is_empty())
         {
-            let status = self.state.status.read().await;
-            if let Some(ref s) = *status {
-                return JoinRoomResult {
-                    success: false,
-                    room: s.room_name.clone(),
-                    ticket: String::new(),
-                    error: Some(format!("already connected to room: {}", s.room_name)),
-                };
-            }
+            return JoinRoomResult {
+                success: false,
+                room: String::new(),
+                ticket: String::new(),
+                error: Some("room name cannot be empty".into()),
+            };
         }
 
-        // Parse ticket if provided.
-        let (bootstrap, ticket_group) = if let Some(ref t) = params.ticket {
-            match t.parse::<ConnectionTicket>() {
-                Ok(ticket) => {
-                    let peer = if ticket.addrs().is_empty() {
-                        BootstrapPeer::new(ticket.node_id())
-                    } else {
-                        BootstrapPeer::with_addr(ticket.node_id(), ticket.addrs()[0])
-                    };
-                    (vec![peer], ticket.group().map(String::from))
-                }
-                Err(e) => {
-                    return JoinRoomResult {
-                        success: false,
-                        room: String::new(),
-                        ticket: String::new(),
-                        error: Some(format!("invalid ticket: {}", e)),
-                    };
-                }
-            }
-        } else {
-            (vec![], None)
-        };
+        self.state.messages.lock().await.clear();
+        *self.state.last_poll_index.lock().await = 0;
 
-        // Determine room name.
-        let room_name = match params.room.or(ticket_group) {
-            Some(name) => name,
-            None => {
-                return JoinRoomResult {
-                    success: false,
-                    room: String::new(),
-                    ticket: String::new(),
-                    error: Some("room name or ticket required".to_string()),
-                };
-            }
-        };
-
-        // Create channel to receive join result.
-        let (reply_tx, reply_rx) = oneshot::channel();
-
-        // Spawn task to perform the join (to avoid Sync issues).
-        let identity = Arc::clone(&self.identity);
-        let state = Arc::clone(&self.state);
-        let join_request = JoinRequest {
-            room_name: room_name.clone(),
-            bootstrap,
-            nickname: params.nickname,
-            reply: reply_tx,
-        };
-
-        tokio::spawn(async move {
-            perform_join(identity, state, join_request).await;
-        });
-
-        // Wait for join result.
-        match reply_rx.await {
-            Ok(Ok(result)) => {
-                // Store the command channel and status.
-                {
-                    let mut session_cmd = self.state.session_cmd.write().await;
-                    *session_cmd = Some(result.cmd_tx);
-                }
-                {
-                    let mut status = self.state.status.write().await;
-                    *status = Some(result.initial_status);
-                }
-                // Clear message buffer.
-                {
-                    let mut messages = self.state.messages.lock().await;
-                    messages.clear();
-                    let mut last_poll_index = self.state.last_poll_index.lock().await;
-                    *last_poll_index = 0;
-                }
-                info!("Joined room: {}", room_name);
+        match perform_join(
+            self.node.clone(),
+            Arc::clone(&self.state),
+            params.room,
+            params.ticket,
+            params.nickname,
+        )
+        .await
+        {
+            Ok(result) => {
+                *self.state.session_cmd.write().await = Some(result.cmd_tx);
+                *self.state.status.write().await = Some(result.initial_status);
                 JoinRoomResult {
                     success: true,
-                    room: room_name,
+                    room: result.room_name,
                     ticket: result.ticket,
                     error: None,
                 }
             }
-            Ok(Err(e)) => JoinRoomResult {
+            Err(error) => JoinRoomResult {
                 success: false,
-                room: room_name,
+                room: String::new(),
                 ticket: String::new(),
-                error: Some(e),
-            },
-            Err(_) => JoinRoomResult {
-                success: false,
-                room: room_name,
-                ticket: String::new(),
-                error: Some("join task failed".to_string()),
+                error: Some(error),
             },
         }
     }
 
-    /// Send a message.
     async fn do_send_message(&self, params: SendMessageParams) -> SendMessageResult {
         if params.message.is_empty() {
             return SendMessageResult {
                 success: false,
                 message_id: None,
-                error: Some("message cannot be empty".to_string()),
+                error: Some("message cannot be empty".into()),
             };
         }
-
-        let session_cmd = self.state.session_cmd.read().await;
-        let cmd_tx = match session_cmd.as_ref() {
-            Some(tx) => tx.clone(),
-            None => {
-                return SendMessageResult {
-                    success: false,
-                    message_id: None,
-                    error: Some("not connected to any room".to_string()),
-                };
-            }
+        let Some(tx) = self.state.session_cmd.read().await.clone() else {
+            return SendMessageResult {
+                success: false,
+                message_id: None,
+                error: Some("not connected to any room".into()),
+            };
         };
-        drop(session_cmd);
-
         let (reply_tx, reply_rx) = oneshot::channel();
-        if cmd_tx
+        if tx
             .send(SessionCommand::SendMessage {
                 content: params.message,
                 reply: reply_tx,
@@ -265,64 +186,40 @@ impl McpServer {
             .await
             .is_err()
         {
-            return SendMessageResult {
-                success: false,
-                message_id: None,
-                error: Some("session closed".to_string()),
-            };
+            return closed_send_result();
         }
-
         match reply_rx.await {
-            Ok(Ok(msg)) => {
-                let message_id = format!(
-                    "{}:{}",
-                    hex::encode(&msg.id.author.as_bytes()[..8]),
-                    msg.id.seq
-                );
-                SendMessageResult {
-                    success: true,
-                    message_id: Some(message_id),
-                    error: None,
-                }
-            }
-            Ok(Err(e)) => SendMessageResult {
+            Ok(Ok(message)) => SendMessageResult {
+                success: true,
+                message_id: Some(message.id.to_string()),
+                error: None,
+            },
+            Ok(Err(error)) => SendMessageResult {
                 success: false,
                 message_id: None,
-                error: Some(e),
+                error: Some(error),
             },
-            Err(_) => SendMessageResult {
-                success: false,
-                message_id: None,
-                error: Some("session closed".to_string()),
-            },
+            Err(_) => closed_send_result(),
         }
     }
 
-    /// Set nickname.
     async fn do_set_nickname(&self, params: SetNicknameParams) -> SetNicknameResult {
-        if params.nickname.is_empty() {
+        if params.nickname.trim().is_empty() {
             return SetNicknameResult {
                 success: false,
                 nickname: None,
-                error: Some("nickname cannot be empty".to_string()),
+                error: Some("nickname cannot be empty".into()),
             };
         }
-
-        let session_cmd = self.state.session_cmd.read().await;
-        let cmd_tx = match session_cmd.as_ref() {
-            Some(tx) => tx.clone(),
-            None => {
-                return SetNicknameResult {
-                    success: false,
-                    nickname: None,
-                    error: Some("not connected to any room".to_string()),
-                };
-            }
+        let Some(tx) = self.state.session_cmd.read().await.clone() else {
+            return SetNicknameResult {
+                success: false,
+                nickname: None,
+                error: Some("not connected to any room".into()),
+            };
         };
-        drop(session_cmd);
-
         let (reply_tx, reply_rx) = oneshot::channel();
-        if cmd_tx
+        if tx
             .send(SessionCommand::SetUsername {
                 name: params.nickname.clone(),
                 reply: reply_tx,
@@ -330,19 +227,12 @@ impl McpServer {
             .await
             .is_err()
         {
-            return SetNicknameResult {
-                success: false,
-                nickname: None,
-                error: Some("session closed".to_string()),
-            };
+            return closed_nickname_result();
         }
-
         match reply_rx.await {
             Ok(Ok(())) => {
-                // Update status.
-                let mut status = self.state.status.write().await;
-                if let Some(ref mut s) = *status {
-                    s.nickname = Some(params.nickname.clone());
+                if let Some(status) = self.state.status.write().await.as_mut() {
+                    status.nickname = Some(params.nickname.clone());
                 }
                 SetNicknameResult {
                     success: true,
@@ -350,89 +240,41 @@ impl McpServer {
                     error: None,
                 }
             }
-            Ok(Err(e)) => SetNicknameResult {
+            Ok(Err(error)) => SetNicknameResult {
                 success: false,
                 nickname: None,
-                error: Some(e),
+                error: Some(error),
             },
-            Err(_) => SetNicknameResult {
-                success: false,
-                nickname: None,
-                error: Some("session closed".to_string()),
-            },
+            Err(_) => closed_nickname_result(),
         }
     }
 
-    /// Leave room.
     async fn do_leave_room(&self) -> LeaveRoomResult {
-        let session_cmd = self.state.session_cmd.read().await;
-        let cmd_tx = match session_cmd.as_ref() {
-            Some(tx) => tx.clone(),
-            None => {
-                return LeaveRoomResult {
-                    success: false,
-                    error: Some("not connected to any room".to_string()),
-                };
-            }
+        let Some(tx) = self.state.session_cmd.read().await.clone() else {
+            return LeaveRoomResult {
+                success: false,
+                error: Some("not connected to any room".into()),
+            };
         };
-        drop(session_cmd);
-
         let (reply_tx, reply_rx) = oneshot::channel();
-        if cmd_tx
+        if tx
             .send(SessionCommand::Leave { reply: reply_tx })
             .await
             .is_err()
         {
+            clear_connected_state(&self.state).await;
             return LeaveRoomResult {
-                success: false,
-                error: Some("session closed".to_string()),
+                success: true,
+                error: None,
             };
         }
-
-        let room_name = {
-            let status = self.state.status.read().await;
-            status.as_ref().map(|s| s.room_name.clone()).unwrap_or_default()
-        };
-
         match reply_rx.await {
-            Ok(Ok(())) => {
-                // Clear state.
-                {
-                    let mut session_cmd = self.state.session_cmd.write().await;
-                    *session_cmd = None;
-                }
-                {
-                    let mut status = self.state.status.write().await;
-                    *status = None;
-                }
-                {
-                    let mut messages = self.state.messages.lock().await;
-                    messages.clear();
-                }
-                info!("Left room: {}", room_name);
-                LeaveRoomResult {
-                    success: true,
-                    error: None,
-                }
-            }
-            Ok(Err(e)) => LeaveRoomResult {
+            Ok(Err(error)) => LeaveRoomResult {
                 success: false,
-                error: Some(e),
+                error: Some(error),
             },
-            Err(_) => {
-                // Session task closed, clean up anyway.
-                {
-                    let mut session_cmd = self.state.session_cmd.write().await;
-                    *session_cmd = None;
-                }
-                {
-                    let mut status = self.state.status.write().await;
-                    *status = None;
-                }
-                {
-                    let mut messages = self.state.messages.lock().await;
-                    messages.clear();
-                }
+            _ => {
+                clear_connected_state(&self.state).await;
                 LeaveRoomResult {
                     success: true,
                     error: None,
@@ -441,118 +283,82 @@ impl McpServer {
         }
     }
 
-    /// Get new messages.
     async fn do_get_new_messages(&self) -> GetNewMessagesResult {
         let buffer = self.state.messages.lock().await;
         let mut last_index = self.state.last_poll_index.lock().await;
-
-        let new_messages: Vec<MessageInfo> = buffer.iter().skip(*last_index).cloned().collect();
+        let messages = buffer.iter().skip(*last_index).cloned().collect();
         *last_index = buffer.len();
-
-        GetNewMessagesResult {
-            messages: new_messages,
-        }
+        GetNewMessagesResult { messages }
     }
 
-    /// Get ticket.
     async fn do_get_ticket(&self) -> GetTicketResult {
-        let status = self.state.status.read().await;
-        let s = match status.as_ref() {
-            Some(s) => s,
-            None => {
-                return GetTicketResult {
-                    success: false,
-                    ticket: None,
-                    error: Some("not connected to any room".to_string()),
-                };
-            }
-        };
-
-        let ticket = if s.ip_addrs.is_empty() {
-            ConnectionTicket::new(self.identity.node_id())
-        } else {
-            ConnectionTicket::with_addrs(self.identity.node_id(), s.ip_addrs.clone())
-        }
-        .with_group(&s.room_name);
-
-        GetTicketResult {
-            success: true,
-            ticket: Some(ticket.to_string()),
-            error: None,
+        match self.state.status.read().await.as_ref() {
+            Some(status) => GetTicketResult {
+                success: true,
+                ticket: Some(status.ticket.clone()),
+                error: None,
+            },
+            None => GetTicketResult {
+                success: false,
+                ticket: None,
+                error: Some("not connected to any room".into()),
+            },
         }
     }
 }
 
-/// Arguments for join_room tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JoinRoomParams {
-    /// Room name to join.
     #[serde(default)]
     pub room: Option<String>,
-    /// Connection ticket (alternative to room name).
     #[serde(default)]
     pub ticket: Option<String>,
-    /// Initial nickname.
     #[serde(default)]
     pub nickname: Option<String>,
 }
 
-/// Arguments for send_message tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMessageParams {
-    /// Message content to send.
     pub message: String,
 }
 
-/// Arguments for set_nickname tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetNicknameParams {
-    /// New nickname to use.
     pub nickname: String,
 }
 
 #[tool_router]
 impl McpServer {
-    /// Join a chat room by name or connection ticket.
-    #[tool(description = "Join a chat room by name or connection ticket. Provide either 'room' (room name) or 'ticket' (connection ticket from another peer). Optionally set initial 'nickname'.")]
+    #[tool(
+        description = "Join a Guardian room. Provide exactly one of 'room' (create) or raw Guardian 'ticket' (import). Optionally set 'nickname'."
+    )]
     async fn join_room(&self, Parameters(params): Parameters<JoinRoomParams>) -> String {
-        let result = self.do_join_room(params).await;
-        serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&self.do_join_room(params).await).unwrap_or_else(|_| "{}".into())
     }
 
-    /// Send a message to the current chat room.
-    #[tool(description = "Send a message to the current chat room. Requires being connected to a room first.")]
+    #[tool(description = "Send a message to the current chat room.")]
     async fn send_message(&self, Parameters(params): Parameters<SendMessageParams>) -> String {
-        let result = self.do_send_message(params).await;
-        serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&self.do_send_message(params).await).unwrap_or_else(|_| "{}".into())
     }
 
-    /// Change display name.
-    #[tool(description = "Change your display name (nickname) in the chat room.")]
+    #[tool(description = "Change your display name in the current room.")]
     async fn set_nickname(&self, Parameters(params): Parameters<SetNicknameParams>) -> String {
-        let result = self.do_set_nickname(params).await;
-        serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&self.do_set_nickname(params).await).unwrap_or_else(|_| "{}".into())
     }
 
-    /// Leave the current chat room.
-    #[tool(description = "Leave the current chat room and disconnect.")]
+    #[tool(description = "Leave the current room gracefully.")]
     async fn leave_room(&self) -> String {
-        let result = self.do_leave_room().await;
-        serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&self.do_leave_room().await).unwrap_or_else(|_| "{}".into())
     }
 
-    /// Get new messages since the last poll.
-    #[tool(description = "Get new messages since the last poll. Returns messages received since the previous call to this tool.")]
+    #[tool(description = "Get messages received since the previous poll.")]
     async fn get_new_messages(&self) -> String {
-        let result = self.do_get_new_messages().await;
-        serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&self.do_get_new_messages().await).unwrap_or_else(|_| "{}".into())
     }
 
-    /// Get a shareable connection ticket.
-    #[tool(description = "Get a shareable connection ticket for the current room. Others can use this ticket to join.")]
+    #[tool(description = "Get the current room's raw Guardian DocTicket.")]
     async fn get_ticket(&self) -> String {
-        let result = self.do_get_ticket().await;
-        serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&self.do_get_ticket().await).unwrap_or_else(|_| "{}".into())
     }
 }
 
@@ -561,10 +367,8 @@ impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "DecentChat MCP server for P2P chat. Use join_room to connect, \
-                 send_message to chat, get_new_messages to receive messages, \
-                 and leave_room to disconnect."
-                    .to_string(),
+                "DecentChat MCP server backed by Guardian DB. Create a room by name or import a raw Guardian ticket, then send and poll messages."
+                    .into(),
             ),
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
@@ -581,39 +385,17 @@ impl ServerHandler for McpServer {
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
             resources: vec![
-                RawResource {
-                    uri: uri::MESSAGES.to_string(),
-                    name: "Chat Messages".to_string(),
-                    title: None,
-                    description: Some("Recent messages in the current chat room".to_string()),
-                    mime_type: Some("application/json".to_string()),
-                    size: None,
-                    icons: None,
-                    meta: None,
-                }
-                .no_annotation(),
-                RawResource {
-                    uri: uri::USERS.to_string(),
-                    name: "Chat Users".to_string(),
-                    title: None,
-                    description: Some("Online users in the current chat room".to_string()),
-                    mime_type: Some("application/json".to_string()),
-                    size: None,
-                    icons: None,
-                    meta: None,
-                }
-                .no_annotation(),
-                RawResource {
-                    uri: uri::STATUS.to_string(),
-                    name: "Connection Status".to_string(),
-                    title: None,
-                    description: Some("Current connection status and room info".to_string()),
-                    mime_type: Some("application/json".to_string()),
-                    size: None,
-                    icons: None,
-                    meta: None,
-                }
-                .no_annotation(),
+                resource(
+                    uri::MESSAGES,
+                    "Chat Messages",
+                    "Recent messages in the current room",
+                ),
+                resource(uri::USERS, "Chat Users", "Members in the current room"),
+                resource(
+                    uri::STATUS,
+                    "Connection Status",
+                    "Current Guardian room status",
+                ),
             ],
             next_cursor: None,
             meta: None,
@@ -625,302 +407,253 @@ impl ServerHandler for McpServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        let uri = &request.uri;
-        match uri.as_str() {
+        let text = match request.uri.as_str() {
             uri::MESSAGES => {
-                let status = self.state.status.read().await;
-                let buffer = self.state.messages.lock().await;
-
-                let room = match status.as_ref() {
-                    Some(s) => s.room_name.clone(),
-                    None => "(not connected)".to_string(),
-                };
-
-                let resource = MessagesResource {
+                let room = current_room(&self.state).await;
+                let messages = self.state.messages.lock().await.clone();
+                serde_json::to_string_pretty(&MessagesResource {
                     room,
-                    messages: buffer.clone(),
-                    total_count: buffer.len(),
-                };
-
-                Ok(ReadResourceResult {
-                    contents: vec![ResourceContents::TextResourceContents {
-                        uri: uri::MESSAGES.to_string(),
-                        mime_type: Some("application/json".to_string()),
-                        text: serde_json::to_string_pretty(&resource).unwrap_or_default(),
-                        meta: None,
-                    }],
+                    total_count: messages.len(),
+                    messages,
                 })
+                .unwrap_or_default()
             }
             uri::USERS => {
-                let session_cmd = self.state.session_cmd.read().await;
-
-                let (room, users) = if let Some(cmd_tx) = session_cmd.as_ref() {
-                    let status = self.state.status.read().await;
-                    let room = status.as_ref().map(|s| s.room_name.clone()).unwrap_or_default();
-                    drop(status);
-
-                    let (reply_tx, reply_rx) = oneshot::channel();
-                    if cmd_tx.send(SessionCommand::GetUsers { reply: reply_tx }).await.is_ok() {
-                        match reply_rx.await {
-                            Ok(users) => (room, users),
-                            Err(_) => (room, vec![]),
-                        }
-                    } else {
-                        (room, vec![])
-                    }
-                } else {
-                    ("(not connected)".to_string(), vec![])
-                };
-
-                let resource = UsersResource { room, users };
-
-                Ok(ReadResourceResult {
-                    contents: vec![ResourceContents::TextResourceContents {
-                        uri: uri::USERS.to_string(),
-                        mime_type: Some("application/json".to_string()),
-                        text: serde_json::to_string_pretty(&resource).unwrap_or_default(),
-                        meta: None,
-                    }],
-                })
+                let room = current_room(&self.state).await;
+                let users = request_users(&self.state).await;
+                serde_json::to_string_pretty(&UsersResource { room, users }).unwrap_or_default()
             }
             uri::STATUS => {
                 let status = self.state.status.read().await;
-
-                let status_info = match status.as_ref() {
-                    Some(s) => StatusInfo {
-                        connected: true,
-                        room: Some(s.room_name.clone()),
-                        nickname: s.nickname.clone(),
-                        peer_count: s.peer_count,
-                        synced: s.synced,
-                    },
-                    None => StatusInfo {
+                let info = status.as_ref().map_or(
+                    StatusInfo {
                         connected: false,
                         room: None,
                         nickname: None,
                         peer_count: 0,
                         synced: false,
                     },
-                };
-
-                let resource = StatusResource {
-                    status: status_info,
-                    node_id: hex::encode(self.identity.node_id().as_bytes()),
-                };
-
-                Ok(ReadResourceResult {
-                    contents: vec![ResourceContents::TextResourceContents {
-                        uri: uri::STATUS.to_string(),
-                        mime_type: Some("application/json".to_string()),
-                        text: serde_json::to_string_pretty(&resource).unwrap_or_default(),
-                        meta: None,
-                    }],
+                    |status| StatusInfo {
+                        connected: true,
+                        room: Some(status.room_name.clone()),
+                        nickname: status.nickname.clone(),
+                        peer_count: status.peer_count,
+                        synced: status.synced,
+                    },
+                );
+                serde_json::to_string_pretty(&StatusResource {
+                    status: info,
+                    node_id: self.node.node_id().to_hex(),
                 })
+                .unwrap_or_default()
             }
-            _ => Err(McpError::resource_not_found(
-                format!("unknown resource: {}", uri),
-                None,
-            )),
-        }
-    }
-}
-
-/// Perform the join operation in a separate task to avoid Sync issues.
-async fn perform_join(
-    identity: Arc<Identity>,
-    state: Arc<SharedState>,
-    request: JoinRequest,
-) {
-    let result = async {
-        // Create transport and join.
-        let config = QuicTransportConfig::default();
-        let transport = QuicTransport::new(&identity, config)
-            .await
-            .map_err(|e| format!("failed to create transport: {}", e))?;
-
-        let group_id = GroupId::new(&request.room_name);
-        let subscription = transport
-            .subscribe(&group_id, request.bootstrap)
-            .await
-            .map_err(|e| format!("failed to subscribe: {}", e))?;
-
-        let (mut session, events) = GroupSession::new(
-            group_id,
-            identity.node_id(),
-            subscription,
-            SessionConfig::default(),
-        );
-
-        // Set nickname if provided.
-        let nickname = request.nickname.clone();
-        if let Some(ref name) = nickname
-            && let Err(e) = session.set_username(name.clone()).await
-        {
-            warn!("failed to set nickname: {}", e);
-        }
-
-        // Get addresses for ticket.
-        let endpoint_addr = transport.endpoint().addr();
-        let ip_addrs: Vec<SocketAddr> = endpoint_addr.ip_addrs().copied().collect();
-
-        // Generate ticket.
-        let ticket = if ip_addrs.is_empty() {
-            ConnectionTicket::new(identity.node_id())
-        } else {
-            ConnectionTicket::with_addrs(identity.node_id(), ip_addrs.clone())
-        }
-        .with_group(&request.room_name);
-
-        // Create command channel.
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-
-        // Initial status.
-        let initial_status = SessionStatus {
-            room_name: request.room_name.clone(),
-            nickname,
-            peer_count: session.peer_count(),
-            synced: session.is_synced(),
-            ip_addrs,
+            unknown => {
+                return Err(McpError::resource_not_found(
+                    format!("unknown resource: {unknown}"),
+                    None,
+                ));
+            }
         };
-
-        // Spawn session task.
-        let state_clone = Arc::clone(&state);
-        tokio::spawn(async move {
-            run_session_task(session, events, transport, cmd_rx, state_clone).await;
-        });
-
-        Ok(JoinResult {
-            ticket: ticket.to_string(),
-            cmd_tx,
-            initial_status,
+        Ok(ReadResourceResult {
+            contents: vec![ResourceContents::TextResourceContents {
+                uri: request.uri,
+                mime_type: Some("application/json".into()),
+                text,
+                meta: None,
+            }],
         })
     }
-    .await;
-
-    let _ = request.reply.send(result);
 }
 
-/// Run the session task that owns the GroupSession.
+async fn perform_join(
+    node: GuardianNode,
+    state: Arc<SharedState>,
+    room: Option<String>,
+    ticket: Option<String>,
+    nickname: Option<String>,
+) -> Result<JoinResult, String> {
+    let (mut session, events) = match (room, ticket) {
+        (Some(room), None) => node.create_room(&room, SessionConfig::default()).await,
+        (None, Some(ticket)) => node.join_room(&ticket, SessionConfig::default()).await,
+        _ => unreachable!(),
+    }
+    .map_err(|error| error.to_string())?;
+
+    if let Some(name) = nickname.clone() {
+        session
+            .set_username(name)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let ticket = session
+        .share_ticket()
+        .await
+        .map_err(|error| error.to_string())?;
+    let room_name = session.state().metadata.name.clone();
+    let initial_status = SessionStatus {
+        room_name: room_name.clone(),
+        nickname,
+        peer_count: session.peer_count(),
+        synced: session.is_synced(),
+        ticket: ticket.clone(),
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    tokio::spawn(run_session_task(session, events, cmd_rx, state));
+    Ok(JoinResult {
+        room_name,
+        ticket,
+        cmd_tx,
+        initial_status,
+    })
+}
+
 async fn run_session_task(
-    mut session: GroupSession,
+    mut session: RoomSession,
     mut events: SessionEventReceiver,
-    transport: QuicTransport,
-    mut cmd_rx: mpsc::Receiver<SessionCommand>,
+    mut commands: mpsc::Receiver<SessionCommand>,
     state: Arc<SharedState>,
 ) {
     loop {
         tokio::select! {
-            Some(cmd) = cmd_rx.recv() => {
-                match cmd {
-                    SessionCommand::SendMessage { content, reply } => {
-                        let result = session.send_message(content).await;
-                        let _ = reply.send(result.map_err(|e| e.to_string()));
-                    }
-                    SessionCommand::SetUsername { name, reply } => {
-                        let result = session.set_username(name).await;
-                        let _ = reply.send(result.map_err(|e| e.to_string()));
-                    }
-                    SessionCommand::Leave { reply } => {
-                        let leave_result = session.leave().await;
-                        if let Err(e) = leave_result {
-                            warn!("error sending leave message: {}", e);
-                        }
-                        if let Err(e) = transport.shutdown().await {
-                            warn!("error shutting down transport: {}", e);
-                        }
-                        let _ = reply.send(Ok(()));
-                        break;
-                    }
-                    SessionCommand::GetUsers { reply } => {
-                        let user_entries = session.state().users.all_entries();
-                        let users: Vec<UserInfo> = user_entries
-                            .into_iter()
-                            .map(|(node, entry)| UserInfo {
-                                node_id: hex::encode(node.as_bytes()),
-                                name: entry.username.clone(),
-                                last_seen: entry.last_seen,
-                            })
-                            .collect();
-                        let _ = reply.send(users);
-                    }
+            command = commands.recv() => match command {
+                Some(SessionCommand::SendMessage { content, reply }) => {
+                    let result = session.send_message(content).await.map_err(|error| error.to_string());
+                    let _ = reply.send(result);
                 }
-            }
-            Some(event) = events.recv() => {
-                match &event {
-                    ChatEvent::MessageReceived { message, .. } => {
-                        let author_name = session.state().display_name(&message.author());
-                        let info = MessageInfo {
-                            author: author_name,
-                            content: message.content.clone(),
-                            timestamp: message.timestamp.wall_time,
-                            id: format!(
-                                "{}:{}",
-                                hex::encode(&message.id.author.as_bytes()[..8]),
-                                message.id.seq
-                            ),
-                        };
-                        let mut buffer = state.messages.lock().await;
-                        buffer.push(info);
-                        if buffer.len() > MAX_MESSAGE_HISTORY {
-                            buffer.remove(0);
-                        }
-                    }
-                    ChatEvent::SyncCompleted { message_count, .. } => {
-                        debug!("Sync completed with {} messages", message_count);
-                        let messages: Vec<_> = session.state().messages.all_messages();
-                        let session_state = session.state();
-                        let new_buffer: Vec<MessageInfo> = messages
-                            .iter()
-                            .take(MAX_MESSAGE_HISTORY)
-                            .map(|msg| {
-                                let author_name = session_state.display_name(&msg.author());
-                                MessageInfo {
-                                    author: author_name,
-                                    content: msg.content.clone(),
-                                    timestamp: msg.timestamp.wall_time,
-                                    id: format!(
-                                        "{}:{}",
-                                        hex::encode(&msg.id.author.as_bytes()[..8]),
-                                        msg.id.seq
-                                    ),
-                                }
-                            })
-                            .collect();
-                        let mut buffer = state.messages.lock().await;
-                        *buffer = new_buffer;
-                        // Update status.
-                        let mut status = state.status.write().await;
-                        if let Some(ref mut s) = *status {
-                            s.synced = session.is_synced();
-                            s.peer_count = session.peer_count();
-                        }
-                    }
-                    ChatEvent::ConnectionChanged { .. } => {
-                        // Update peer count.
-                        let mut status = state.status.write().await;
-                        if let Some(ref mut s) = *status {
-                            s.peer_count = session.peer_count();
-                        }
-                    }
-                    _ => {}
+                Some(SessionCommand::SetUsername { name, reply }) => {
+                    let result = session.set_username(name).await.map_err(|error| error.to_string());
+                    let _ = reply.send(result);
                 }
-            }
-            result = session.process_event() => {
-                if result.is_none() {
-                    debug!("Session closed");
+                Some(SessionCommand::GetUsers { reply }) => {
+                    let users = session.state().members.values().filter(|member| !member.offline).map(|member| UserInfo {
+                        node_id: member.node_id.to_hex(),
+                        name: session.state().display_name(&member.node_id),
+                        last_seen: Some(member.heartbeat_at_ms),
+                    }).collect();
+                    let _ = reply.send(users);
+                }
+                Some(SessionCommand::Leave { reply }) => {
+                    let result = session.leave().await.map_err(|error| error.to_string());
+                    let _ = reply.send(result);
                     break;
                 }
+                None => break,
+            },
+            event = events.recv() => match event {
+                Some(event) => handle_session_event(&session, &state, event).await,
+                None => break,
+            },
+            projected = session.process_event() => match projected {
+                Some(Ok(())) => {}
+                Some(Err(error)) => warn!(%error, "Guardian room projection failed"),
+                None => break,
             }
         }
     }
+    clear_connected_state(&state).await;
+    debug!("Guardian MCP room task stopped");
+}
 
-    // Clean up state.
-    {
-        let mut session_cmd = state.session_cmd.write().await;
-        *session_cmd = None;
+async fn handle_session_event(session: &RoomSession, state: &SharedState, event: ChatEvent) {
+    match event {
+        ChatEvent::MessageReceived { message, .. } => {
+            push_message(state, message_info(session, &message)).await;
+        }
+        ChatEvent::SyncCompleted { .. } => {
+            let history = session
+                .state()
+                .messages
+                .iter()
+                .rev()
+                .take(MAX_MESSAGE_HISTORY)
+                .rev()
+                .map(|message| message_info(session, message))
+                .collect();
+            *state.messages.lock().await = history;
+        }
+        _ => {}
     }
+    if let Some(status) = state.status.write().await.as_mut() {
+        status.peer_count = session.peer_count();
+        status.synced = session.is_synced();
+    }
+}
+
+fn message_info(session: &RoomSession, message: &Message) -> MessageInfo {
+    MessageInfo {
+        author: session.state().display_name(&message.author),
+        content: message.content.clone(),
+        timestamp: message.sent_at_ms,
+        id: message.id.to_string(),
+    }
+}
+
+async fn push_message(state: &SharedState, message: MessageInfo) {
+    let mut messages = state.messages.lock().await;
+    messages.push(message);
+    if messages.len() > MAX_MESSAGE_HISTORY {
+        messages.remove(0);
+    }
+}
+
+async fn request_users(state: &SharedState) -> Vec<UserInfo> {
+    let Some(tx) = state.session_cmd.read().await.clone() else {
+        return Vec::new();
+    };
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if tx
+        .send(SessionCommand::GetUsers { reply: reply_tx })
+        .await
+        .is_err()
     {
-        let mut status = state.status.write().await;
-        *status = None;
+        return Vec::new();
+    }
+    reply_rx.await.unwrap_or_default()
+}
+
+async fn current_room(state: &SharedState) -> String {
+    state
+        .status
+        .read()
+        .await
+        .as_ref()
+        .map(|status| status.room_name.clone())
+        .unwrap_or_else(|| "(not connected)".into())
+}
+
+async fn clear_connected_state(state: &SharedState) {
+    *state.session_cmd.write().await = None;
+    *state.status.write().await = None;
+    state.messages.lock().await.clear();
+    *state.last_poll_index.lock().await = 0;
+}
+
+fn resource(uri: &str, name: &str, description: &str) -> rmcp::model::Resource {
+    RawResource {
+        uri: uri.into(),
+        name: name.into(),
+        title: None,
+        description: Some(description.into()),
+        mime_type: Some("application/json".into()),
+        size: None,
+        icons: None,
+        meta: None,
+    }
+    .no_annotation()
+}
+
+fn closed_send_result() -> SendMessageResult {
+    SendMessageResult {
+        success: false,
+        message_id: None,
+        error: Some("session closed".into()),
+    }
+}
+
+fn closed_nickname_result() -> SetNicknameResult {
+    SetNicknameResult {
+        success: false,
+        nickname: None,
+        error: Some("session closed".into()),
     }
 }

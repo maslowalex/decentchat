@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 
 /// Decentralized terminal chat.
 #[derive(Parser)]
@@ -28,7 +28,7 @@ pub enum Command {
     /// Join a group as a peer (launches TUI).
     Join(JoinArgs),
 
-    /// Start as a relay node (headless, persistent).
+    /// Start as an always-on Guardian super peer.
     Relay(RelayArgs),
 
     /// Generate or show node identity.
@@ -43,8 +43,14 @@ pub enum Command {
 
 /// Arguments for the join command.
 #[derive(clap::Args)]
+#[command(group(
+    ArgGroup::new("room_source")
+        .required(true)
+        .multiple(false)
+        .args(["group", "ticket"])
+))]
 pub struct JoinArgs {
-    /// Group name (optional if ticket contains group).
+    /// Create or reopen a room with this group name.
     #[arg(short, long)]
     pub group: Option<String>,
 
@@ -52,15 +58,11 @@ pub struct JoinArgs {
     #[arg(short, long)]
     pub name: String,
 
-    /// Connection ticket from relay.
+    /// Raw Guardian DocTicket shared by a room member.
     #[arg(short, long)]
     pub ticket: Option<String>,
 
-    /// Known peer (node_id or node_id@host:port).
-    #[arg(short, long)]
-    pub peer: Vec<String>,
-
-    /// Disable relay servers (for local/LAN testing).
+    /// Use mDNS-only discovery instead of global n0 discovery.
     #[arg(long)]
     pub local: bool,
 }
@@ -69,24 +71,16 @@ pub struct JoinArgs {
 #[derive(clap::Args)]
 pub struct RelayArgs {
     /// Listen port.
-    #[arg(long, default_value = "4433")]
+    #[arg(long, default_value = "4001")]
     pub port: u16,
-
-    /// Persist state to file.
-    #[arg(long)]
-    pub state_file: Option<PathBuf>,
 
     /// Groups to host (comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub groups: Vec<String>,
 
-    /// Disable relay servers (for local/LAN testing).
+    /// Use mDNS-only discovery instead of global n0 discovery.
     #[arg(long)]
     pub local: bool,
-
-    /// External IP to advertise (for NAT/VPS deployments).
-    #[arg(long, env = "RELAY_EXTERNAL_IP")]
-    pub external_ip: Option<std::net::IpAddr>,
 }
 
 /// Arguments for the identity command.
@@ -95,4 +89,59 @@ pub struct IdentityArgs {
     /// Regenerate identity (overwrites existing).
     #[arg(long)]
     pub force: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_requires_exactly_one_room_source() {
+        assert!(Cli::try_parse_from(["decentchat", "join", "--name", "alice"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "decentchat",
+                "join",
+                "--name",
+                "alice",
+                "--group",
+                "room",
+                "--ticket",
+                "ticket"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["decentchat", "join", "--name", "alice", "--group", "room"])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn removed_join_and_relay_options_are_rejected() {
+        assert!(
+            Cli::try_parse_from([
+                "decentchat",
+                "join",
+                "--name",
+                "alice",
+                "--group",
+                "room",
+                "--peer",
+                "peer"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "decentchat",
+                "relay",
+                "--groups",
+                "room",
+                "--external-ip",
+                "127.0.0.1"
+            ])
+            .is_err()
+        );
+    }
 }

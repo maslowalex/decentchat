@@ -1,7 +1,8 @@
 [Unit]
-Description=DecentChat Relay Node
+Description=DecentChat Guardian Super Peer
 Documentation=https://github.com/user/decentchat
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple

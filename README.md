@@ -1,18 +1,19 @@
-# decentchat
+# DecentChat
 
-Decentralized terminal chat using iroh P2P networking and CRDTs.
+Decentralized terminal chat backed by [Guardian DB](https://crates.io/crates/guardian-db). Guardian's iroh-docs/Willow key-value store is the only persistence, synchronization, transport, discovery, and invitation layer.
 
 ## Features
 
-- Peer-to-peer messaging with no central server
-- CRDT-based message ordering for eventual consistency
-- Terminal UI with presence indicators
-- Persistent identity across sessions
-- MCP server for AI agent integration (Claude Code, etc.)
+- Peer-to-peer messaging with persistent late-join history
+- Raw Guardian `DocTicket` room invitations with read/write capability
+- Terminal UI with nicknames and online/away/offline presence
+- Persistent Iroh node identity, including one-time import of the legacy raw key
+- One-process, multi-room Guardian super-peer mode
+- MCP tools and resources for AI agent integrations
 
-## Installation
+## Requirements and installation
 
-### From Source
+Rust 1.97 is pinned in `rust-toolchain.toml`.
 
 ```bash
 git clone https://github.com/youruser/decentchat.git
@@ -20,148 +21,83 @@ cd decentchat
 cargo install --path crates/decentchat
 ```
 
-### From Git (once published)
+Guardian data is stored under `~/.config/decentchat/guardian/` by default. The Iroh identity is `guardian/node_secret.key`; room namespaces and Guardian metadata live below the same directory. If the old `identity.key` contains exactly 32 raw bytes, DecentChat imports it once and preserves the node ID.
 
-```bash
-cargo install --git https://github.com/youruser/decentchat
-```
+## Quick start
 
-## Quick Start
-
-### 1. Create Your Identity
+Create or inspect the local identity:
 
 ```bash
 decentchat identity
+decentchat info
 ```
 
-This generates a keypair stored in `~/.config/decentchat/`.
-
-### 2. Start a Relay (First User)
+Create a room and open the TUI:
 
 ```bash
-decentchat relay --groups myroom
+decentchat join --group myroom --name Alice
 ```
 
-This starts a chat room and displays a connection ticket. Share this ticket with others.
-
-### 3. Join a Room
+The creator can obtain a shareable ticket through MCP, or run an always-on super peer which prints one ticket per room:
 
 ```bash
-decentchat join --ticket <ticket> --name YourName
+decentchat relay --groups myroom,team --port 4001
 ```
 
-Paste the ticket from the relay to join the chat.
-
-## Local Testing (LAN/Same Machine)
-
-For testing without internet relay servers, use the `--local` flag.
-
-### Terminal 1: Start the Relay
+Join using the exact raw Guardian ticket:
 
 ```bash
-decentchat relay --local --groups test --port 4433
+decentchat join --ticket '<guardian-doc-ticket>' --name Bob
 ```
 
-Output will show:
-```
-Relay node started
-Node ID: <64-char-hex>
+`join` accepts exactly one of `--group` and `--ticket`. A legacy `dchat...` ticket returns an explicit migration error; create a Guardian room and distribute its new raw ticket. The removed `--peer`, `--state-file`, and `--external-ip` flags are no longer needed.
 
-Share this ticket to join 'test':
-  dchat...
+For LAN-only discovery, pass `--local` to `join` or `relay`. This keeps mDNS enabled and disables n0 global discovery.
 
-Or use traditional format:
-  --peer <node_id>@<ip>:<port>
-
-Hosting groups: test
-```
-
-### Terminal 2: Join as a Peer
-
-Using the ticket (recommended):
-```bash
-decentchat join --local --ticket dchat... --name Alice
-```
-
-Or using the peer address directly:
-```bash
-decentchat join --local --group test --name Alice \
-  --peer <node_id>@192.168.x.x:4433
-```
-
-### Terminal 3: Join as Another Peer
+To simulate another identity on one machine:
 
 ```bash
-# Use a different config directory to simulate a different user
-decentchat --config-dir /tmp/bob join --local --ticket dchat... --name Bob
+decentchat --config-dir /tmp/decentchat-bob \
+  join --local --ticket '<guardian-doc-ticket>' --name Bob
 ```
 
-Now Alice and Bob can chat! Messages sync via CRDTs.
-
-## Slash Commands
-
-Inside the chat TUI:
+## TUI commands
 
 | Command | Description |
-|---------|-------------|
-| `/nick <name>` | Set your display name |
-| `/quit` | Exit the chat |
-| `/help` | Show available commands |
-| `/users` | List connected users |
-| `/clear` | Clear the chat screen |
+|---|---|
+| `/nick <name>` | Change your nickname |
+| `/quit` | Leave gracefully and exit |
+| `/help` | Show commands |
+| `/users` | Toggle the members sidebar |
+| `/clear` | Clear the local display |
 
-## MCP Server (AI Agent Integration)
+Members heartbeat every 30 seconds. A graceful leave is shown offline immediately; a peer that disappears becomes away after 90 seconds.
 
-DecentChat includes an MCP (Model Context Protocol) server for AI agent integration.
-
-### Start the MCP Server
+## MCP server
 
 ```bash
 decentchat mcp
 ```
 
-This starts a stdio-based MCP server that AI tools like Claude Code can connect to.
+The stable tool set is `join_room`, `send_message`, `set_nickname`, `leave_room`, `get_new_messages`, and `get_ticket`. `join_room` accepts exactly one of `room` (create) or `ticket` (import), and ticket results are raw Guardian tickets.
 
-### Configure Claude Code
-
-Add to your Claude Code settings (`.claude/settings.json`):
-
-```json
-{
-  "mcpServers": {
-    "decentchat": {
-      "command": "decentchat",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-### Available MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `join_room` | Join a chat room by name or ticket |
-| `send_message` | Send a message to the current room |
-| `set_nickname` | Change display name |
-| `leave_room` | Leave the current room |
-| `get_messages` | Get recent messages |
-
-### Available MCP Resources
+Resources remain:
 
 | URI | Description |
-|-----|-------------|
-| `chat://messages` | Recent messages (JSON) |
-| `chat://users` | Online users list |
-| `chat://status` | Connection status |
+|---|---|
+| `chat://messages` | Recent messages as JSON |
+| `chat://users` | Current room members as JSON |
+| `chat://status` | Guardian room and node status as JSON |
 
 ## Architecture
 
-- **decentchat** - CLI binary
-- **decentchat-core** - CRDTs and event types
-- **decentchat-mcp** - MCP server for AI integration
-- **decentchat-protocol** - Wire protocol and sync
-- **decentchat-tui** - Terminal UI with ratatui
+- `decentchat`: CLI and process orchestration
+- `decentchat-core`: versioned JSON domain records and `ChatEvent`
+- `decentchat-guardian`: Guardian node, room-store adapter, projection, tickets, and presence
+- `decentchat-tui`: ratatui terminal UI
+- `decentchat-mcp`: MCP tools and resources
+
+See [PLAN.md](PLAN.md) for record keys, synchronization behavior, and lifecycle details.
 
 ## License
 

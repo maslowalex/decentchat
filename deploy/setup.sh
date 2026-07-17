@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== DecentChat Relay Node Setup ==="
+echo "=== DecentChat Guardian Super-Peer Setup ==="
 echo ""
 
 # Check if running as root for system-wide installation
@@ -9,6 +9,10 @@ if [ "$EUID" -ne 0 ]; then
     echo "Please run as root (sudo ./setup.sh)"
     exit 1
 fi
+
+# Guardian DB 0.19 requires the toolchain pinned by the repository.
+echo "Installing Rust 1.97 toolchain..."
+su - "$ACTUAL_USER" -c "$ACTUAL_HOME/.cargo/bin/rustup toolchain install 1.97.0 --profile minimal"
 
 # Get the actual user who invoked sudo
 ACTUAL_USER=${SUDO_USER:-$USER}
@@ -44,7 +48,7 @@ if [ ! -f /etc/decentchat/relay.env ]; then
 fi
 chown -R "$ACTUAL_USER:$ACTUAL_USER" /etc/decentchat
 
-# Create data directory for identity
+# Create persistent Guardian data directory (identity, blobs, docs, and stores)
 mkdir -p /var/lib/decentchat
 chown -R "$ACTUAL_USER:$ACTUAL_USER" /var/lib/decentchat
 
@@ -67,4 +71,4 @@ echo "  2. Start the relay:    sudo systemctl start decentchat-relay"
 echo "  3. Check status:       sudo systemctl status decentchat-relay"
 echo "  4. View logs:          journalctl -u decentchat-relay -f"
 echo ""
-echo "To get the connection ticket, check the logs after starting."
+echo "To get each raw Guardian ticket, check the logs after starting."

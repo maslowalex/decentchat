@@ -9,7 +9,7 @@
 //! - `set_nickname` - Change display name
 //! - `leave_room` - Leave the current room
 //! - `get_new_messages` - Poll for new messages
-//! - `get_ticket` - Get shareable connection ticket
+//! - `get_ticket` - Get a shareable raw Guardian ticket
 //!
 //! # Resources
 //!

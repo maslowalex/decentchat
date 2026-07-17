@@ -1,100 +1,61 @@
-# DecentChat Relay Deployment
+# DecentChat Guardian super-peer deployment
 
-Deploy a DecentChat relay node on any Linux VPS with systemd.
+Deploy one always-on, multi-room Guardian super peer on a Linux VPS with systemd.
 
-## Quick Start
+## Setup
 
-1. Clone the repository to your VPS:
-   ```bash
-   git clone https://github.com/user/decentchat.git
-   cd decentchat
-   ```
+```bash
+git clone https://github.com/user/decentchat.git
+cd decentchat
+sudo ./deploy/setup.sh
+sudo systemctl start decentchat-relay
+journalctl -u decentchat-relay -f
+```
 
-2. Run the setup script:
-   ```bash
-   sudo ./deploy/setup.sh
-   ```
-
-3. Edit configuration (optional):
-   ```bash
-   sudo nano /etc/decentchat/relay.env
-   ```
-
-4. Start the relay:
-   ```bash
-   sudo systemctl start decentchat-relay
-   ```
-
-5. Get the connection ticket from logs:
-   ```bash
-   journalctl -u decentchat-relay | grep "dchat:"
-   ```
+The setup installs Rust 1.97, builds DecentChat, creates `/var/lib/decentchat`, and installs the service. Guardian stores its node secret, blobs, iroh-docs state, and room stores beneath `/var/lib/decentchat/guardian/`.
 
 ## Configuration
 
 Edit `/etc/decentchat/relay.env`:
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `RELAY_GROUPS` | `lobby` | Comma-separated list of groups to host |
-| `RELAY_PORT` | `4433` | UDP port for QUIC connections |
+|---|---|---|
+| `RELAY_GROUPS` | `lobby` | Comma-separated rooms kept online by this process |
+| `RELAY_PORT` | `4001` | Guardian/Iroh UDP endpoint port |
 
-After changing configuration, restart the service:
+Then restart:
+
 ```bash
 sudo systemctl restart decentchat-relay
 ```
 
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `sudo systemctl start decentchat-relay` | Start the relay |
-| `sudo systemctl stop decentchat-relay` | Stop the relay |
-| `sudo systemctl restart decentchat-relay` | Restart the relay |
-| `sudo systemctl status decentchat-relay` | Check status |
-| `journalctl -u decentchat-relay -f` | Follow logs |
-
-## Connecting Clients
-
-Share the connection ticket with users:
+The journal prints a raw Guardian ticket for each room. Share the whole string unchanged:
 
 ```bash
-decentchat join --ticket "dchat:..." --name "YourName"
+decentchat join --ticket '<guardian-doc-ticket>' --name YourName
 ```
 
-## Firewall
+There is no external-IP or manual-peer setting. Guardian/Iroh performs discovery and relay selection; use the application's `--local` flag only for an mDNS-only LAN deployment.
 
-Ensure the relay port is open:
+Open the configured UDP port, for example:
 
 ```bash
-# UFW
-sudo ufw allow 4433/udp
-
-# firewalld
-sudo firewall-cmd --add-port=4433/udp --permanent
-sudo firewall-cmd --reload
-
-# iptables
-sudo iptables -A INPUT -p udp --dport 4433 -j ACCEPT
+sudo ufw allow 4001/udp
 ```
 
-## Files
+Useful commands:
+
+```bash
+sudo systemctl status decentchat-relay
+sudo systemctl restart decentchat-relay
+journalctl -u decentchat-relay -f
+```
+
+Persistent files:
 
 | Path | Description |
-|------|-------------|
+|---|---|
 | `/usr/local/bin/decentchat` | Binary |
-| `/etc/decentchat/relay.env` | Configuration |
-| `/var/lib/decentchat/` | Identity and state |
-| `/etc/systemd/system/decentchat-relay.service` | Systemd unit |
-
-## Uninstall
-
-```bash
-sudo systemctl stop decentchat-relay
-sudo systemctl disable decentchat-relay
-sudo rm /etc/systemd/system/decentchat-relay.service
-sudo rm /usr/local/bin/decentchat
-sudo rm -rf /etc/decentchat
-sudo rm -rf /var/lib/decentchat
-sudo systemctl daemon-reload
-```
+| `/etc/decentchat/relay.env` | Service configuration |
+| `/var/lib/decentchat/guardian/` | Guardian identity and replicated room data |
+| `/etc/systemd/system/decentchat-relay.service` | systemd unit |
