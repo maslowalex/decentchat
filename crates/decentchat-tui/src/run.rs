@@ -16,6 +16,13 @@ use crate::input::{Action, map_key_event};
 use crate::render::render;
 use crate::terminal::{Tui, init, restore};
 
+/// State returned after a graceful TUI exit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunOutcome {
+    /// The final nickname, including changes made with `/nick`.
+    pub username: String,
+}
+
 /// Timeout in milliseconds for presence (considered away after this).
 const PRESENCE_TIMEOUT_MS: u64 = 90_000;
 
@@ -36,7 +43,7 @@ pub async fn run(
     mut session: RoomSession,
     mut events: SessionEventReceiver,
     config: AppConfig,
-) -> Result<()> {
+) -> Result<RunOutcome> {
     let mut terminal = init()?;
     let local_node = session.local_node();
     let username = config.username.clone();
@@ -63,12 +70,16 @@ pub async fn run(
     let result = run_loop(&mut terminal, &mut app, &mut session, &mut events).await;
 
     // Always restore terminal, even on error.
-    restore(&mut terminal)?;
+    let restore_result = restore(&mut terminal);
 
     // Leave the session gracefully.
     let _ = session.leave().await;
 
-    result
+    result?;
+    restore_result?;
+    Ok(RunOutcome {
+        username: app.username().to_owned(),
+    })
 }
 
 /// Main event loop.
@@ -196,8 +207,11 @@ async fn submit_message(app: &mut App, session: &mut RoomSession) {
 async fn handle_command(app: &mut App, session: &mut RoomSession, cmd: Command) {
     match cmd {
         Command::Nick(new_name) => {
-            if let Err(e) = session.set_username(new_name).await {
+            let new_name = new_name.trim().to_owned();
+            if let Err(e) = session.set_username(new_name.clone()).await {
                 app.add_message(DisplayMessage::system(format!("Error: {}", e)));
+            } else {
+                app.set_username(new_name);
             }
         }
 

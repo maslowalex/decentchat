@@ -78,6 +78,22 @@ impl DisplayMessage {
     }
 }
 
+#[cfg(test)]
+mod username_tests {
+    use super::*;
+
+    #[test]
+    fn updates_local_username() {
+        let config = AppConfig {
+            group_name: "room".to_owned(),
+            username: "Alice".to_owned(),
+        };
+        let mut app = App::new(config, NodeId::from_bytes([1; 32]));
+        app.set_username("Ally".to_owned());
+        assert_eq!(app.username(), "Ally");
+    }
+}
+
 /// Connection status for display.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConnectionStatus {
@@ -195,6 +211,11 @@ impl App {
     /// Get the username.
     pub fn username(&self) -> &str {
         &self.config.username
+    }
+
+    /// Update the local username shown by the application.
+    pub fn set_username(&mut self, username: String) {
+        self.config.username = username;
     }
 
     /// Get the local node ID.

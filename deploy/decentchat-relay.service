@@ -1,6 +1,6 @@
 [Unit]
-Description=DecentChat Guardian Super Peer
-Documentation=https://github.com/user/decentchat
+Description=DecentChat Room Host
+Documentation=https://github.com/maslowalex/decentchat
 Wants=network-online.target
 After=network-online.target
 
@@ -9,7 +9,7 @@ Type=simple
 User=%USER%
 EnvironmentFile=/etc/decentchat/relay.env
 Environment=DECENTCHAT_CONFIG=/var/lib/decentchat
-ExecStart=/usr/local/bin/decentchat relay --groups ${RELAY_GROUPS} --port ${RELAY_PORT}
+ExecStart=/usr/local/bin/decentchat host --groups ${RELAY_GROUPS} --port ${RELAY_PORT}
 Restart=always
 RestartSec=5
 StandardOutput=journal

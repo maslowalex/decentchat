@@ -2,7 +2,9 @@
 
 mod cli;
 mod config;
+mod profile;
 
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -15,26 +17,45 @@ use tokio::task::JoinSet;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use cli::{Cli, Command, IdentityArgs, JoinArgs, RelayArgs};
+use cli::{Cli, Command, HostArgs, IdentityArgs, JoinArgs};
+use config::ConfigRole;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let config_dir = config::config_dir(cli.config_dir)?;
+    let Cli {
+        command,
+        config_dir,
+        verbose,
+    } = Cli::parse();
 
-    match cli.command {
+    match command {
         Command::Join(args) => {
-            setup_logging(cli.verbose, true);
+            setup_logging(verbose, true);
+            let config_dir = config::config_dir(config_dir, ConfigRole::Client)?;
             cmd_join(config_dir, args).await
         }
-        Command::Relay(args) => {
-            setup_logging(cli.verbose, false);
-            cmd_relay(config_dir, args).await
+        Command::Host(args) => {
+            setup_logging(verbose, false);
+            let config_dir = config::config_dir(config_dir, ConfigRole::Host)?;
+            cmd_host(config_dir, args).await
         }
-        Command::Identity(args) => cmd_identity(config_dir, args).await,
-        Command::Info => cmd_info(config_dir).await,
+        Command::Relay(args) => {
+            setup_logging(verbose, false);
+            // Keep the historical default directory for the compatibility command.
+            let config_dir = config::config_dir(config_dir, ConfigRole::Client)?;
+            cmd_host(config_dir, args).await
+        }
+        Command::Identity(args) => {
+            let config_dir = config::config_dir(config_dir, ConfigRole::Client)?;
+            cmd_identity(config_dir, args).await
+        }
+        Command::Info => {
+            let config_dir = config::config_dir(config_dir, ConfigRole::Client)?;
+            cmd_info(config_dir).await
+        }
         Command::Mcp => {
-            setup_logging(cli.verbose, true);
+            setup_logging(verbose, true);
+            let config_dir = config::config_dir(config_dir, ConfigRole::Client)?;
             cmd_mcp(config_dir).await
         }
     }
@@ -55,12 +76,11 @@ fn setup_logging(verbose: bool, quiet_transport: bool) {
 }
 
 async fn cmd_join(config_dir: PathBuf, args: JoinArgs) -> Result<()> {
-    if args.name.trim().is_empty() {
-        bail!("username must not be empty");
-    }
+    let name = resolve_display_name(&config_dir, args.name)?;
 
     let node = open_node(&config_dir, 0, args.local, true).await?;
-    let (session, events) = match (args.group.as_deref(), args.ticket.as_deref()) {
+    let ticket = args.ticket.as_deref().or(args.ticket_option.as_deref());
+    let (session, events) = match (args.group.as_deref(), ticket) {
         (Some(group), None) => node
             .create_room(group, SessionConfig::default())
             .await
@@ -74,40 +94,91 @@ async fn cmd_join(config_dir: PathBuf, args: JoinArgs) -> Result<()> {
     let group_name = session.state().metadata.name.clone();
     let tui_config = AppConfig {
         group_name,
-        username: args.name,
+        username: name,
     };
 
-    decentchat_tui::run(session, events, tui_config)
+    let outcome = decentchat_tui::run(session, events, tui_config)
         .await
         .context("TUI error")?;
+    profile::save_display_name(&config_dir, &outcome.username)?;
     node.shutdown().await?;
     Ok(())
 }
 
-async fn cmd_relay(config_dir: PathBuf, args: RelayArgs) -> Result<()> {
-    if args.groups.is_empty() {
-        bail!("at least one group is required (use --groups)");
+fn resolve_display_name(config_dir: &Path, requested: Option<String>) -> Result<String> {
+    resolve_display_name_with(
+        config_dir,
+        requested,
+        io::stdin().is_terminal(),
+        prompt_display_name,
+    )
+}
+
+fn prompt_display_name() -> Result<String> {
+    loop {
+        print!("Choose your display name: ");
+        io::stdout()
+            .flush()
+            .context("failed to display name prompt")?;
+        let mut input = String::new();
+        let bytes_read = io::stdin()
+            .read_line(&mut input)
+            .context("failed to read display name")?;
+        if bytes_read == 0 {
+            bail!("no display name entered; rerun with '--name <NAME>'");
+        }
+        match profile::normalize_display_name(&input) {
+            Ok(display_name) => return Ok(display_name),
+            Err(error) => eprintln!("{error}"),
+        }
     }
-    if args.groups.iter().any(|group| group.trim().is_empty()) {
-        bail!("group names must not be empty");
+}
+
+fn resolve_display_name_with<F>(
+    config_dir: &Path,
+    requested: Option<String>,
+    interactive: bool,
+    prompt: F,
+) -> Result<String>
+where
+    F: FnOnce() -> Result<String>,
+{
+    if let Some(requested) = requested {
+        return profile::save_display_name(config_dir, &requested);
     }
+    if let Some(saved) = profile::load_display_name(config_dir)? {
+        return Ok(saved);
+    }
+    if !interactive {
+        bail!(
+            "no display name configured; rerun with '--name <NAME>' or join once in an interactive terminal"
+        );
+    }
+    let prompted = prompt()?;
+    profile::save_display_name(config_dir, &prompted)
+}
+
+async fn cmd_host(config_dir: PathBuf, args: HostArgs) -> Result<()> {
+    let groups = resolve_host_groups(args.room, args.groups)?;
 
     let node = open_node(&config_dir, args.port, args.local, true).await?;
-    println!("Guardian super peer started");
+    println!("DecentChat host started");
     println!("Node ID: {}", node.node_id().to_hex());
     println!("Storage: {}", node.data_dir().display());
 
     let mut tasks = JoinSet::new();
-    for group in &args.groups {
+    for group in &groups {
         let (session, events) = node
             .create_room(group, SessionConfig::default())
             .await
             .with_context(|| format!("failed to host Guardian room '{group}'"))?;
         let ticket = session.share_ticket().await?;
-        println!("\nShare this Guardian ticket to join '{group}':\n  {ticket}");
+        println!("\nRoom '{group}' is ready");
+        println!("Ticket:\n  {ticket}");
+        println!("Join with:\n  decentchat join '{ticket}'");
         tasks.spawn(run_hosted_room(session, events));
     }
-    println!("\nHosting groups: {}", args.groups.join(", "));
+    println!("\nHosting rooms: {}", groups.join(", "));
 
     tokio::signal::ctrl_c().await?;
     println!("\nShutting down...");
@@ -115,6 +186,20 @@ async fn cmd_relay(config_dir: PathBuf, args: RelayArgs) -> Result<()> {
     while tasks.join_next().await.is_some() {}
     node.shutdown().await?;
     Ok(())
+}
+
+fn resolve_host_groups(room: Option<String>, groups: Vec<String>) -> Result<Vec<String>> {
+    let groups = if let Some(room) = room {
+        vec![room]
+    } else if groups.is_empty() {
+        vec!["lobby".to_owned()]
+    } else {
+        groups
+    };
+    if groups.iter().any(|group| group.trim().is_empty()) {
+        bail!("room names must not be empty");
+    }
+    Ok(groups)
 }
 
 async fn run_hosted_room(
@@ -202,4 +287,81 @@ async fn open_node(
     GuardianNode::open(config)
         .await
         .context("failed to start Guardian DB node")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_name_is_trimmed_saved_and_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let name =
+            resolve_display_name_with(dir.path(), Some("  Alice  ".to_owned()), false, || {
+                panic!("prompt must not be called")
+            })
+            .unwrap();
+        assert_eq!(name, "Alice");
+
+        let saved = resolve_display_name_with(dir.path(), None, false, || {
+            panic!("prompt must not be called")
+        })
+        .unwrap();
+        assert_eq!(saved, "Alice");
+    }
+
+    #[test]
+    fn first_interactive_join_prompts_and_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let name =
+            resolve_display_name_with(dir.path(), None, true, || Ok("Bob\n".to_owned())).unwrap();
+        assert_eq!(name, "Bob");
+        assert_eq!(
+            profile::load_display_name(dir.path()).unwrap(),
+            Some("Bob".to_owned())
+        );
+    }
+
+    #[test]
+    fn first_non_interactive_join_requires_name_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = resolve_display_name_with(dir.path(), None, false, || {
+            panic!("prompt must not be called")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--name <NAME>"));
+    }
+
+    #[test]
+    fn explicit_name_replaces_saved_name() {
+        let dir = tempfile::tempdir().unwrap();
+        profile::save_display_name(dir.path(), "Alice").unwrap();
+        let name = resolve_display_name_with(dir.path(), Some("Ally".to_owned()), true, || {
+            panic!("prompt must not be called")
+        })
+        .unwrap();
+        assert_eq!(name, "Ally");
+        assert_eq!(
+            profile::load_display_name(dir.path()).unwrap(),
+            Some("Ally".to_owned())
+        );
+    }
+
+    #[test]
+    fn host_defaults_to_lobby_and_accepts_overrides() {
+        assert_eq!(
+            resolve_host_groups(None, Vec::new()).unwrap(),
+            vec!["lobby"]
+        );
+        assert_eq!(
+            resolve_host_groups(Some("team".to_owned()), Vec::new()).unwrap(),
+            vec!["team"]
+        );
+        assert_eq!(
+            resolve_host_groups(None, vec!["one".to_owned(), "two".to_owned()]).unwrap(),
+            vec!["one", "two"]
+        );
+        assert!(resolve_host_groups(Some("  ".to_owned()), Vec::new()).is_err());
+    }
 }

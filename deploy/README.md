@@ -1,18 +1,18 @@
 # DecentChat Guardian super-peer deployment
 
-Deploy one always-on, multi-room Guardian super peer on a Linux VPS with systemd.
+Deploy one always-on, multi-room DecentChat host on a Linux VPS with systemd.
 
 ## Setup
 
 ```bash
-git clone https://github.com/user/decentchat.git
+git clone https://github.com/maslowalex/decentchat.git
 cd decentchat
 sudo ./deploy/setup.sh
 sudo systemctl start decentchat-relay
 journalctl -u decentchat-relay -f
 ```
 
-The setup installs Rust 1.97, builds DecentChat, creates `/var/lib/decentchat`, and installs the service. Guardian stores its node secret, blobs, iroh-docs state, and room stores beneath `/var/lib/decentchat/guardian/`.
+The setup downloads the latest checksum-verified DecentChat release, creates `/var/lib/decentchat`, and installs the service. Guardian stores its node secret, blobs, iroh-docs state, and room stores beneath `/var/lib/decentchat/guardian/`.
 
 ## Configuration
 
@@ -32,8 +32,10 @@ sudo systemctl restart decentchat-relay
 The journal prints a raw Guardian ticket for each room. Share the whole string unchanged:
 
 ```bash
-decentchat join --ticket '<guardian-doc-ticket>' --name YourName
+decentchat join '<guardian-doc-ticket>'
 ```
+
+The first join prompts for a display name. For unattended use, pass `--name YourName`.
 
 There is no external-IP or manual-peer setting. Guardian/Iroh performs discovery and relay selection; use the application's `--local` flag only for an mDNS-only LAN deployment.
 

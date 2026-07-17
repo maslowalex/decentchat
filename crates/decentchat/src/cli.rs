@@ -29,7 +29,11 @@ pub enum Command {
     Join(JoinArgs),
 
     /// Start as an always-on Guardian super peer.
-    Relay(RelayArgs),
+    Host(HostArgs),
+
+    /// Compatibility name for `host`.
+    #[command(hide = true)]
+    Relay(HostArgs),
 
     /// Generate or show node identity.
     Identity(IdentityArgs),
@@ -47,34 +51,42 @@ pub enum Command {
     ArgGroup::new("room_source")
         .required(true)
         .multiple(false)
-        .args(["group", "ticket"])
+        .args(["group", "ticket", "ticket_option"])
 ))]
 pub struct JoinArgs {
+    /// Raw Guardian DocTicket shared by a room member.
+    #[arg(value_name = "TICKET")]
+    pub ticket: Option<String>,
+
     /// Create or reopen a room with this group name.
     #[arg(short, long)]
     pub group: Option<String>,
 
-    /// Your display name.
+    /// Your display name (saved as the client default).
     #[arg(short, long)]
-    pub name: String,
+    pub name: Option<String>,
 
-    /// Raw Guardian DocTicket shared by a room member.
-    #[arg(short, long)]
-    pub ticket: Option<String>,
+    /// Raw Guardian DocTicket (legacy flag form).
+    #[arg(short = 't', long = "ticket", value_name = "TICKET")]
+    pub ticket_option: Option<String>,
 
     /// Use mDNS-only discovery instead of global n0 discovery.
     #[arg(long)]
     pub local: bool,
 }
 
-/// Arguments for the relay command.
+/// Arguments for the host command.
 #[derive(clap::Args)]
-pub struct RelayArgs {
+pub struct HostArgs {
+    /// Room to host.
+    #[arg(value_name = "ROOM", conflicts_with = "groups")]
+    pub room: Option<String>,
+
     /// Listen port.
     #[arg(long, default_value = "4001")]
     pub port: u16,
 
-    /// Groups to host (comma-separated).
+    /// Rooms to host (comma-separated; compatibility/advanced form).
     #[arg(long, value_delimiter = ',')]
     pub groups: Vec<String>,
 
@@ -102,8 +114,6 @@ mod tests {
             Cli::try_parse_from([
                 "decentchat",
                 "join",
-                "--name",
-                "alice",
                 "--group",
                 "room",
                 "--ticket",
@@ -111,14 +121,30 @@ mod tests {
             ])
             .is_err()
         );
+        assert!(Cli::try_parse_from(["decentchat", "join", "--group", "room"]).is_ok());
+        assert!(Cli::try_parse_from(["decentchat", "join", "ticket"]).is_ok());
         assert!(
-            Cli::try_parse_from(["decentchat", "join", "--name", "alice", "--group", "room"])
-                .is_ok()
+            Cli::try_parse_from(["decentchat", "join", "ticket", "--ticket", "other"]).is_err()
         );
     }
 
     #[test]
-    fn removed_join_and_relay_options_are_rejected() {
+    fn host_defaults_and_relay_compatibility_parse() {
+        let host = Cli::try_parse_from(["decentchat", "host"]).unwrap();
+        let Command::Host(args) = host.command else {
+            panic!("expected host command");
+        };
+        assert!(args.room.is_none());
+        assert!(args.groups.is_empty());
+        assert_eq!(args.port, 4001);
+
+        assert!(Cli::try_parse_from(["decentchat", "relay", "--groups", "one,two"]).is_ok());
+        assert!(Cli::try_parse_from(["decentchat", "host", "room"]).is_ok());
+        assert!(Cli::try_parse_from(["decentchat", "host", "room", "--groups", "other"]).is_err());
+    }
+
+    #[test]
+    fn removed_transport_options_are_rejected() {
         assert!(
             Cli::try_parse_from([
                 "decentchat",
@@ -135,7 +161,7 @@ mod tests {
         assert!(
             Cli::try_parse_from([
                 "decentchat",
-                "relay",
+                "host",
                 "--groups",
                 "room",
                 "--external-ip",

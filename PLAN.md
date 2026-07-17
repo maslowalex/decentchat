@@ -25,11 +25,11 @@ Messages are immutable, deduplicated by key, and displayed in `(sent_at_ms, UUID
 
 Room invitations are Guardian's raw write-capability `DocTicket` strings. Import waits at most 30 seconds for `meta/room`. Possession of the ticket grants read/write access and the ability to forward the ticket. Legacy `dchat...` tickets are intentionally incompatible.
 
-Normal mode enables mDNS and n0 discovery. `--local` enables mDNS only. `relay` is an always-on Guardian super peer with a fixed endpoint port and may keep any number of requested room namespaces online in one process.
+Normal mode enables mDNS and n0 discovery. `--local` enables mDNS only. `host` (also available through its compatibility alias `relay`) is an always-on Guardian super peer with a fixed endpoint port and may keep any number of requested room namespaces online in one process.
 
 ## Identity and storage
 
-Guardian data defaults to `~/.config/decentchat/guardian/`. If `identity.key` exists and `guardian/node_secret.key` does not, its exact 32 raw bytes are copied once before Guardian starts. Guardian generates all subsequent identities. `decentchat identity --force` removes only the Guardian node secret and deliberately skips legacy re-import for that regeneration.
+Client Guardian data defaults to `~/.config/decentchat/guardian/`; the default dedicated host uses `~/.config/decentchat/host/guardian/` so both processes can run together. A client display name is stored in `profile.json` after the first prompt or an explicit `--name`. If `identity.key` exists and `guardian/node_secret.key` does not, its exact 32 raw bytes are copied once before Guardian starts. Guardian generates all subsequent identities. `decentchat identity --force` removes only the Guardian node secret and deliberately skips legacy re-import for that regeneration.
 
 ## Test boundary
 
