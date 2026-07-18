@@ -259,31 +259,37 @@ impl App {
 
     /// Insert a character at the cursor position.
     pub fn insert_char(&mut self, c: char) {
-        if self.input.len() >= MAX_INPUT_LENGTH {
+        if self.input.len().saturating_add(c.len_utf8()) > MAX_INPUT_LENGTH {
             return;
         }
 
         self.input.insert(self.cursor_pos, c);
-        self.cursor_pos += 1;
+        self.cursor_pos += c.len_utf8();
     }
 
     /// Delete the character before the cursor (backspace).
     pub fn delete_char_before(&mut self) {
         if self.cursor_pos > 0 {
-            self.cursor_pos -= 1;
+            self.cursor_pos = self.input[..self.cursor_pos]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(index, _)| index);
             self.input.remove(self.cursor_pos);
         }
     }
 
     /// Move cursor left.
     pub fn cursor_left(&mut self) {
-        self.cursor_pos = self.cursor_pos.saturating_sub(1);
+        self.cursor_pos = self.input[..self.cursor_pos]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(index, _)| index);
     }
 
     /// Move cursor right.
     pub fn cursor_right(&mut self) {
-        if self.cursor_pos < self.input.len() {
-            self.cursor_pos += 1;
+        if let Some(character) = self.input[self.cursor_pos..].chars().next() {
+            self.cursor_pos += character.len_utf8();
         }
     }
 
@@ -417,6 +423,48 @@ mod tests {
 
         app.cursor_right();
         assert_eq!(app.cursor_pos, 1);
+    }
+
+    #[test]
+    fn unicode_input_editing_stays_on_character_boundaries() {
+        let mut app = App::new(make_config(), make_node(1));
+
+        for character in "Привіт 👋".chars() {
+            app.insert_char(character);
+            assert!(app.input.is_char_boundary(app.cursor_pos));
+        }
+        assert_eq!(app.input, "Привіт 👋");
+        assert_eq!(app.cursor_pos, app.input.len());
+
+        app.cursor_left();
+        assert_eq!(app.cursor_pos, "Привіт ".len());
+        app.insert_char('!');
+        assert_eq!(app.input, "Привіт !👋");
+
+        app.delete_char_before();
+        assert_eq!(app.input, "Привіт 👋");
+        assert_eq!(app.cursor_pos, "Привіт ".len());
+
+        app.cursor_left();
+        app.cursor_left();
+        assert_eq!(&app.input[app.cursor_pos..], "т 👋");
+        app.cursor_right();
+        assert_eq!(&app.input[app.cursor_pos..], " 👋");
+    }
+
+    #[test]
+    fn unicode_input_respects_byte_limit_without_splitting_characters() {
+        let mut app = App::new(make_config(), make_node(1));
+
+        for _ in 0..(MAX_INPUT_LENGTH - 1) {
+            app.insert_char('a');
+        }
+        app.insert_char('👋');
+        assert_eq!(app.input.len(), MAX_INPUT_LENGTH - 1);
+
+        app.insert_char('b');
+        assert_eq!(app.input.len(), MAX_INPUT_LENGTH);
+        assert!(app.input.is_char_boundary(app.cursor_pos));
     }
 
     #[test]
